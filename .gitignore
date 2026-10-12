@@ -1,0 +1,11 @@
+# build output
+*.exe
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# runtime logs
+packy_log.txt
+boxxy_log.txt

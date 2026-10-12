@@ -59,8 +59,43 @@ def clean_system(tok):
     return tok.replace("l", "I").upper()
 
 
+def _tab_count(lines, tab_word):
+    """The member count shown on the tab ('Local [33]' / 'Local[33]'), or None if it can't be read."""
+    for line in lines:
+        if tab_word in line:
+            i = line.index(tab_word)
+            text = "".join(w[0] for w in line[i:i + 2])
+            m = re.search(r"\[(\d{1,4})", text)
+            return int(m.group(1)) if m else None
+    return None
+
+
+_COUNT_RE = re.compile(r"^\W{0,2}(\d{1,4})$")        # member-count header: person icon + number ('& 33')
+
+
+def _member_header(img, tx, ty, th, count):
+    """Find the member list's header (person icon + member count) in the strip just under the tab row, on
+    either side of the tab. Returns (x, top, bottom) of the number, or None. Nothing about the window's size
+    or layout is assumed: chat windows are resized, narrowed and rearranged differently by every player."""
+    W, H = img.size
+    box = (max(0, int(tx - 1200)), int(ty + th + 2), min(W, int(tx + 1400)), min(H, int(ty + th + 6 * th + 30)))
+    if box[2] - box[0] < 20 or box[3] - box[1] < 8:
+        return None
+    hits = []
+    for ln in ocr.recognize(img.crop(box), 3):
+        for w in ln:
+            m = _COUNT_RE.match(w[0])
+            if m and (count is None or int(m.group(1)) == count):
+                hits.append((box[0] + w[1], box[1] + w[2], box[1] + w[2] + w[4]))
+    # closest to the tab row first (chat lines further down can contain bare numbers too)
+    return min(hits, key=lambda h: (h[1], abs(h[0] - tx)), default=None)
+
+
 def find_local_windows(img):
-    """img: PIL RGB screenshot. Returns [{'system', 'tab', 'list'}] in image coordinates."""
+    """img: PIL RGB screenshot. Returns [{'system', 'tab', 'list'}] in image coordinates.
+
+    Everything is measured from the picture itself: the 'Local' tab, the member list's count header, and the
+    window lines around them - so it works for any chat window size, width or position."""
     W, H = img.size
     gray = img.convert("L")
     lines = []
@@ -72,21 +107,34 @@ def find_local_windows(img):
     found = []
     for tab_word in _tab_words(lines):
         tx, ty, tw, th = tab_word[1:]
-        verts = _fraction_lines(gray, (tx + 80, ty + 45, min(W - 1, tx + 1100), min(H, ty + 130)), "v")
-        if not verts:
-            continue
-        div = verts[0]
-        right = next((v for v in verts if v > div + 60), None)
+        count = _tab_count(lines, tab_word)
+        head = _member_header(img, tx, ty, th, count) or (count is not None and _member_header(img, tx, ty, th, None))
+        if head:
+            hx, htop, hbot = head
+            band_t, band_b = int(hbot + th), int(min(H, hbot + th * 8))      # a band of list rows under the header
+            left = _fraction_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b), "v")
+            div = left[-1] if left else int(hx - 2.6 * th)                   # line just left of the header
+            y0 = int(hbot + 3)
+        else:                                                                # header hidden: older fallback
+            band_t, band_b = int(ty + 3 * th), int(min(H, ty + 11 * th))
+            left = _fraction_lines(gray, (int(tx + tw + 4), band_t, min(W - 1, int(tx + 100 * th)), band_b), "v")
+            if not left:
+                continue
+            div = left[0]
+            y0 = int(ty + 2.5 * th)
         x0 = div + 3
-        x1 = (right - 2) if right else min(W - 1, div + 260)
-        y0 = int(ty + 28)
-        horiz = _fraction_lines(gray, (x0, int(ty + 120), x1, min(H, int(ty + 1500))), "h")
-        y1 = horiz[0] - 1 if horiz else min(H, y0 + 800)
+        right = _fraction_lines(gray, (int(x0 + 4 * th), band_t, min(W - 1, int(x0 + 60 * th)), band_b), "v")
+        x1 = (right[0] - 2) if right else min(W - 1, int(x0 + 22 * th))
+        horiz = _fraction_lines(gray, (x0, int(y0 + 2 * th), x1, H), "h")    # bottom of the panel
+        y1 = horiz[0] - 1 if horiz else H
+        if x1 - x0 < 4 * th or y1 - y0 < 2 * th:
+            continue
         system = ""
         best_y = -1
+        chat_l, chat_r = (div - 100 * th, div) if div > tx else (x1, x1 + 100 * th)
         for ln in lines:                  # latest "Local : <system>" chat line inside this panel
-            if (ln[0][0].lower() == "local" and len(ln) >= 2 and tx <= ln[0][1] < div
-                    and ln[0][2] > ty + 30 and ln[0][2] > best_y):
+            if (ln[0][0].lower() == "local" and len(ln) >= 2 and chat_l <= ln[0][1] < chat_r
+                    and ln[0][2] > ty + 2 * th and ln[0][2] > best_y):
                 best_y, system = ln[0][2], clean_system(ln[1][0])
         found.append({"system": system, "tab": (tx, ty, tw, th), "list": (x0, y0, x1, y1)})
     return found

@@ -148,11 +148,12 @@ def grab_box(box, hwnd=None):
     return img.crop((l - ox, t - oy, r - ox, b - oy))
 
 
-def local_tab_visible(tab, hwnd=None):
-    """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved)."""
+def local_tab_visible(tab, hwnd=None, th=11):
+    """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved).
+    th = height of the tab text, so the checked area follows the UI scale."""
     tx, ty = tab
     try:
-        img = grab_box((int(tx) - 6, int(ty) - 6, int(tx) + 90, int(ty) + 24), hwnd)
+        img = grab_box((int(tx - th * 0.6), int(ty - th * 0.6), int(tx + th * 8.5), int(ty + th * 2.2)), hwnd)
     except OSError:
         return False                                      # minimized
     return any(w[0].lower().startswith("local") for ln in ocr.recognize(img, 4) for w in ln)
@@ -365,7 +366,7 @@ def scan_screens(lock_hwnd=None):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
             results.append({"system": w["system"], "monitor": 0, "account": lock[0], "hwnd": lock[2],
-                            "client_rect": lock[1], "tab": (ox + tx, oy + ty),
+                            "client_rect": lock[1], "tab": (ox + tx, oy + ty), "tab_h": th,
                             "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
         return results
     for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
@@ -387,7 +388,8 @@ def scan_screens(lock_hwnd=None):
             results.append({"system": w["system"], "monitor": i,
                             "account": owner[0] if owner else "", "hwnd": owner[2] if owner else None,
                             "client_rect": owner[1] if owner else None,
-                            "tab": (px, py), "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
+                            "tab": (px, py), "tab_h": th,
+                            "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
     return results
 
 
@@ -1295,12 +1297,12 @@ class App(tk.Tk):
                 return
             # screen capture + OCR (~150 ms) run on a worker so the window stays responsive
             tab, box, known = self.current["tab"], self.current["list"], set(self.known or ())
-            hwnd = self.lock_hwnd
+            hwnd, th = self.lock_hwnd, self.current.get("tab_h", 11)
             res = {}
 
             def work():
                 try:
-                    res["visible"] = local_tab_visible(tab, hwnd)
+                    res["visible"] = local_tab_visible(tab, hwnd, th)
                     if res["visible"]:
                         res["img"] = grab_box(box, hwnd)
                         res["read"] = read_names(res["img"], known)
@@ -1341,6 +1343,8 @@ class App(tk.Tk):
                     self.last_relocate = now
                     self.job = self.after(1000, self.tick)
                     return
+                self.job = self.after(int(next_in * 1000), self.tick)   # a blip: nothing was read, try again
+                return
             else:
                 if self.tab_misses >= 3:
                     self.show_outline(theme.GOOD)

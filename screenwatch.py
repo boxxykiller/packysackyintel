@@ -379,9 +379,9 @@ def scan_screens(lock_hwnd=None):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
             results.append({"system": w["system"], "monitor": 0, "account": lock[0], "hwnd": lock[2],
-                            "client_rect": lock[1], "tab": (ox + tx, oy + ty), "tab_h": th,
+                            "client_rect": lock[1], "tab": (ox + tx, oy + ty), "tab_h": th, "score": w["score"],
                             "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
-        return results
+        return sorted(results, key=lambda r: -r["score"])
     for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
         area = (mx, my, mx + mw, my + mh)
         if lock:                                          # just the part of the locked client on this monitor
@@ -401,9 +401,9 @@ def scan_screens(lock_hwnd=None):
             results.append({"system": w["system"], "monitor": i,
                             "account": owner[0] if owner else "", "hwnd": owner[2] if owner else None,
                             "client_rect": owner[1] if owner else None,
-                            "tab": (px, py), "tab_h": th,
+                            "tab": (px, py), "tab_h": th, "score": w["score"],
                             "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
-    return results
+    return sorted(results, key=lambda r: -r["score"])      # confirmed member lists first
 
 
 class App(tk.Tk):
@@ -767,6 +767,9 @@ class App(tk.Tk):
                 self.status.set(f"{self.lock_account}'s client is minimized - restore it so Local is on screen.")
             elif state == "gone":
                 self.status.set(f"{self.lock_account}'s client is not running - waiting for it to come back.")
+            elif "skipped (no member list)" in (_last_debug[0] or ""):
+                self.status.set("Found the Local tab but not its member list - make sure the member list (with "
+                                "the member count at its top) is showing. Nothing is read until it is.")
             else:
                 self.status.set("Searching for Local chat… make sure the Local tab and its member list are visible.")
             self.set_state("SEARCHING", "search")
@@ -1169,7 +1172,8 @@ class App(tk.Tk):
             res = []
         self.windows = res
         self.combo["values"] = [self.label(w, i) for i, w in enumerate(res, 1)]
-        cands = res                                       # (a locked scan only returns the locked client's Local)
+        top = max((w.get("score", 0) for w in res), default=0)
+        cands = [w for w in res if w.get("score", 0) == top]   # the best-confirmed member list(s) only
         if not cands:
             self.misses += 1
             if self.misses >= 2 and not self.paused:

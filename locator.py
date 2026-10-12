@@ -47,11 +47,22 @@ def _tab_words(lines):
             if re.match(r"^local\[\d*\]?$", t, re.I):                    # "Local[4]"
                 out.append(w)
             elif t.lower() == "local" and (
-                    len(line) == 1                                         # alone on its line
+                    (len(line) == 1 and not _wrapped_message(lines, w))    # alone on its line
                     or (nxt and re.match(r"^\[\d*\]?$", nxt))               # "Local [4]"
                     or (prv and not nxt and re.match(r"^\[\d+\]$", prv))):  # "... [62] Local"
                 out.append(w)
     return out
+
+
+def _wrapped_message(lines, w):
+    """True if a lone 'Local' word is really part of a wrapped 'Channel changed to Local : X' chat message
+    (narrow chat windows put 'Local' on a line of its own, under '... changed to')."""
+    for ln in lines:
+        last = ln[-1]
+        if (last[0].lower() == "to" and 0 < w[2] - last[2] <= 2.5 * w[4]
+                and abs(ln[0][1] - w[1]) <= 4 * w[4]):
+            return True
+    return False
 
 
 def clean_system(tok):
@@ -75,7 +86,8 @@ _COUNT_RE = re.compile(r"^\W{0,2}(\d{1,4})$")        # member-count header: pers
 
 def _member_header(img, tx, ty, th, count):
     """Find the member list's header (person icon + member count) in the strip just under the tab row.
-    Returns (x, top, bottom) of the number, or None. EVE always puts a channel's member list on the right of
+    Returns (x, top, bottom, match) of the number, or None; match is 2 when it equals the tab's count, 1 when
+    the tab's count looks like a misread of it ('[2' for 24), 0 for some other number near the tab. EVE always puts a channel's member list on the right of
     its chat, so only the right of the tab is searched - a neighbouring chat window to the left has its own
     member list (and count) that must never be mistaken for Local's. Nothing about the window's size is
     assumed: chat windows are resized and narrowed differently by every player."""
@@ -88,10 +100,21 @@ def _member_header(img, tx, ty, th, count):
     for ln in ocr.recognize(strip, 3):
         for w in ln:
             m = _COUNT_RE.match(w[0])
-            if m and (count is None or int(m.group(1)) == count):
-                hits.append((box[0] + w[1], box[1] + w[2], box[1] + w[2] + w[4]))
-    # closest to the tab row first (chat lines further down can contain bare numbers too), then nearest the tab
-    return min(hits, key=lambda h: (round(h[1] / th), h[0] - tx), default=None)
+            if not m:
+                continue
+            n, x = m.group(1), box[0] + w[1]
+            if count is not None and int(n) == count:
+                match = 2
+            elif count is not None and (n.startswith(str(count)) or str(count).startswith(n)):
+                match = 1
+            elif count is None and x <= tx + 60 * th:                 # tab's count unreadable: nearest number
+                match = 0
+            else:
+                continue                                              # another window's count: never Local's
+            hits.append((x, box[1] + w[2], box[1] + w[2] + w[4], match))
+    # best match with the tab's count, then closest to the tab row (chat lines further down can contain bare
+    # numbers too), then nearest the tab
+    return min(hits, key=lambda h: (-h[3], round(h[1] / th), h[0] - tx), default=None)
 
 
 def _vline_extent(gray, x, y, th):
@@ -140,29 +163,19 @@ def find_local_windows(img):
     for tab_word in _tab_words(lines):
         tx, ty, tw, th = tab_word[1:]
         count = _tab_count(lines, tab_word)
-        # the header must show the tab's member count; only if the tab's count is unreadable is any number
-        # taken (then the nearest one right of the tab)
+        # Only a confirmed member list counts: the person-icon + count header right of a real Local tab.
+        # Without it nothing is guessed - guessing is how other windows (watch list, fleet, overview) got read.
         head = _member_header(img, tx, ty, th, count)
-        left = []
-        if head:
-            hx, htop, hbot = head
-            band_t, band_b = int(hbot + th), int(min(H, hbot + th * 8))      # a band of list rows under the header
-            left = _fraction_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b), "v")
-        if left:
-            div = left[-1]                                                   # line just left of the header
-            y0 = int(hbot + 3)
-        else:                                                                # header hidden: older fallback
-            head = None
-            band_t, band_b = int(ty + 3 * th), int(min(H, ty + 11 * th))
-            left = _fraction_lines(gray, (int(tx + tw + 4), band_t, min(W - 1, int(tx + 100 * th)), band_b), "v")
-            if not left:
-                continue
-            div = left[0]
-            y0 = None
+        if not head:
+            DEBUG.append(f"tab=({tx:.0f},{ty:.0f}) th={th:.0f} count={count} header=None -> skipped (no member list)")
+            continue
+        hx, htop, hbot, match = head
+        band_t, band_b = int(hbot + th), int(min(H, hbot + th * 8))          # a band of list rows under the header
+        left = _fraction_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b), "v")
+        div = left[-1] if left else int(hx - 2.6 * th)                       # line just left of the header
+        y0 = int(hbot + 3)
         ext_top, ext_bot = _vline_extent(gray, div, (band_t + band_b) // 2, th)
-        if y0 is None:                                                       # list starts where the divider does
-            y0 = max(int(ty + 1.5 * th), ext_top + 2)                        # (a header row read as a name is
-        x0 = div + 3                                                         # dropped: it is only digits)
+        x0 = div + 3
         right = _fraction_lines(gray, (int(x0 + 4 * th), band_t, min(W - 1, int(x0 + 60 * th)), band_b), "v")
         x1 = (right[0] - 2) if right else min(W - 1, int(x0 + 22 * th))
         # bottom of the panel = a line that runs on past the divider into the chat side. Member rows can have
@@ -181,5 +194,7 @@ def find_local_windows(img):
             if (ln[0][0].lower() == "local" and len(ln) >= 2 and chat_l <= ln[0][1] < chat_r
                     and ln[0][2] > ty + 2 * th and ln[0][2] > best_y):
                 best_y, system = ln[0][2], clean_system(ln[1][0])
-        found.append({"system": system, "tab": (tx, ty, tw, th), "list": (x0, y0, x1, y1)})
+        # 2 = header shows exactly the tab's count, 1 = the tab's count looks misread, 0 = some number near it
+        found.append({"system": system, "tab": (tx, ty, tw, th), "list": (x0, y0, x1, y1), "score": match})
+    found.sort(key=lambda f: -f["score"])
     return found

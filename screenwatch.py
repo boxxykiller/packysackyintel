@@ -2,6 +2,7 @@
 tracks who is in it, and alerts when someone neutral / hostile enters."""
 import colorsys
 import ctypes
+import ctypes.wintypes
 import datetime
 import difflib
 import math
@@ -33,11 +34,16 @@ import theme
 import universe
 import updater
 import wormholes
+try:
+    import wgc                                            # Windows Graphics Capture (Windows 10 1903+)
+except Exception:
+    wgc = None
 from version import VERSION
 
 ALERT_STANDINGS = {"neutral", "hostile", "unknown"}      # corp (green), fleet (purple), allies (blue) are ignored
 STANDING_LABEL = {"neutral": "neutral", "hostile": "HOSTILE", "unknown": "unknown",
                   "corp": "corp", "fleet": "fleet", "ally": "ally"}
+ANY_CLIENT = "Any client (first Local found)"
 RELOCATE_EVERY = 5.0          # seconds between full-screen searches while watching
 REPORT_TTL = 600             # seconds an intel report stays on the map
 GRACE_AFTER_JUMP = 6.0        # seconds to silently re-baseline after the system changes
@@ -113,34 +119,85 @@ def grab_region(box):
         u.ReleaseDC(None, sdc)
 
 
-def local_tab_visible(tab):
+_WGC_FAILED = set()          # windows that window capture refused: read them from the screen instead
+
+
+def window_capture(hwnd):
+    """(image, (x, y) screen origin) of a client window via Windows Graphics Capture, or None if unavailable.
+    This is the compositor's copy of the window, so it is still right when other windows cover the client."""
+    if not hwnd or wgc is None or hwnd in _WGC_FAILED:
+        return None
+    if ctypes.windll.user32.IsIconic(hwnd):
+        raise OSError("client minimized")
+    try:
+        return wgc.capture_for(hwnd).grab()
+    except Exception as ex:
+        _WGC_FAILED.add(hwnd)
+        log(f"WINDOW CAPTURE UNAVAILABLE for {hwnd}, using screen capture: {ex!r}")
+        return None
+
+
+def grab_box(box, hwnd=None):
+    """Pixels of box (screen coordinates): from the locked client's own window image when there is one
+    (works even if it is covered), otherwise from the screen."""
+    got = window_capture(hwnd)
+    if got is None:
+        return grab_region(box)
+    img, (ox, oy) = got
+    l, t, r, b = (int(v) for v in box)
+    return img.crop((l - ox, t - oy, r - ox, b - oy))
+
+
+def local_tab_visible(tab, hwnd=None):
     """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved)."""
     tx, ty = tab
-    img = grab_region((int(tx) - 6, int(ty) - 6, int(tx) + 90, int(ty) + 24))
+    try:
+        img = grab_box((int(tx) - 6, int(ty) - 6, int(tx) + 90, int(ty) + 24), hwnd)
+    except OSError:
+        return False                                      # minimized
     return any(w[0].lower().startswith("local") for ln in ocr.recognize(img, 4) for w in ln)
 
 
-def eve_clients():
-    """[(account, (l, t, r, b))] for every open EVE client window, topmost first. Only the window's
-    title bar text ('EVE - <account>') and size are read from Windows; nothing is read from the game."""
+def eve_clients(include_minimized=False):
+    """[(account, (l, t, r, b), hwnd)] for every open EVE client window, topmost first.
+
+    EULA-safe by design: this only asks the Windows window manager for its own list of top-level windows
+    (title, position, visible / minimized). The game process is never opened, attached to, read from or
+    sent any message (GetWindowText on another process's window returns the caption Windows already has
+    cached; it does not send WM_GETTEXT). Everything else this tool knows comes from the screen pixels."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
     out = []
     proc = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.LPARAM)
 
     def cb(hwnd, lparam):
-        if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+        if user32.IsWindowVisible(hwnd) and (include_minimized or not user32.IsIconic(hwnd)):
             buf = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(hwnd, buf, 256)
             m = re.match(r"^EVE\s+-\s+(.+)$", buf.value)
             if m:
                 r = wintypes.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(r))
-                out.append((m.group(1).strip(), (r.left, r.top, r.right, r.bottom)))
+                out.append((m.group(1).strip(), (r.left, r.top, r.right, r.bottom), hwnd))
         return 1
 
     user32.EnumWindows(proc(cb), 0)
     return out
+
+
+def client_state(hwnd):
+    """'gone', 'minimized' or 'open' for a client window handle (window manager only, nothing from the game)."""
+    user32 = ctypes.windll.user32
+    if not hwnd or not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
+        return "gone"
+    return "minimized" if user32.IsIconic(hwnd) else "open"
+
+
+def find_client(hwnd, account):
+    """The locked client: same window handle if it still exists, else (game restarted) the same account name."""
+    clients = eve_clients(include_minimized=True)
+    return (next((c for c in clients if c[2] == hwnd), None)
+            or next((c for c in clients if account and c[0] == account), None))
 
 
 LOG = os.path.join(os.path.dirname(sys.executable if getattr(sys, "frozen", False)
@@ -293,19 +350,44 @@ def read_names(img, known=()):  # -> (names, unsure rows, clipped names)
     return out, unsure, clipped
 
 
-def scan_screens():
-    """Find every visible Local chat on every monitor. Returns [{'system','tab','list','monitor'}] in screen coords."""
+def scan_screens(lock_hwnd=None):
+    """Find every visible Local chat. Returns [{'system','tab','list','monitor','account','hwnd'}] in screen coords.
+    With lock_hwnd only that client's window area is captured, and only a Local that is on that client counts."""
     results = []
     clients = eve_clients()
-    for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
-        img = grab_region((mx, my, mx + mw, my + mh))
+    lock = next((c for c in clients if c[2] == lock_hwnd), None) if lock_hwnd else None
+    if lock_hwnd and not lock:
+        return results                                    # locked client closed / minimized
+    got = window_capture(lock[2]) if lock else None
+    if got is not None:                                   # the locked client's own image: covered or not
+        img, (ox, oy) = got
         for w in locator.find_local_windows(img):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
-            px, py = mx + tx, my + ty
-            account = next((a for a, (cl, ct, cr, cb_) in clients if cl <= px < cr and ct <= py < cb_), "")
-            results.append({"system": w["system"], "monitor": i, "account": account,
-                            "tab": (mx + tx, my + ty), "list": (mx + int(l), my + int(t), mx + int(r), my + int(b))})
+            results.append({"system": w["system"], "monitor": 0, "account": lock[0], "hwnd": lock[2],
+                            "client_rect": lock[1], "tab": (ox + tx, oy + ty),
+                            "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
+        return results
+    for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
+        area = (mx, my, mx + mw, my + mh)
+        if lock:                                          # just the part of the locked client on this monitor
+            cl, ct, cr, cb_ = lock[1]
+            area = (max(area[0], cl), max(area[1], ct), min(area[2], cr), min(area[3], cb_))
+            if area[2] - area[0] < 200 or area[3] - area[1] < 150:
+                continue
+        ox, oy = area[0], area[1]
+        img = grab_region(area)
+        for w in locator.find_local_windows(img):
+            tx, ty, tw, th = w["tab"]
+            l, t, r, b = w["list"]
+            px, py = ox + tx, oy + ty
+            owner = next((c for c in clients if c[1][0] <= px < c[1][2] and c[1][1] <= py < c[1][3]), None)
+            if lock and (owner is None or owner[2] != lock[2]):
+                continue                                  # another client is on top of the locked one here
+            results.append({"system": w["system"], "monitor": i,
+                            "account": owner[0] if owner else "", "hwnd": owner[2] if owner else None,
+                            "client_rect": owner[1] if owner else None,
+                            "tab": (px, py), "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
     return results
 
 
@@ -337,7 +419,9 @@ class App(tk.Tk):
         self.paused = False        # locked window disappeared: waiting for it to come back
         self.misses = 0
         self.tab_misses = 0
-        self.lock_account = ""
+        self.lock_account = ""      # locked EVE client (title 'EVE - <account>'), "" = any client
+        self.lock_hwnd = None       # its window handle, so it is followed even if the title changes
+        self.clients = []           # [(account, rect, hwnd)] for the client picker
         self.grace_until = 0.0
         self.joined = {}           # name -> (time, standing) for people who entered after start-up
         self.known = None          # {name: standing} - everyone seen at start-up or already alerted
@@ -354,7 +438,7 @@ class App(tk.Tk):
         self.diff_text = tk.StringVar(value="")
         self.names_text = tk.StringVar(value="")
         self.choice = tk.StringVar()
-        self.lock = tk.BooleanVar(value=True)
+        self.client_choice = tk.StringVar(value=ANY_CLIENT)
 
         # -- header: logo, name, status pill, gradient accent
         hdr = ttk.Frame(self, style="Header.TFrame", padding=(16, 12, 16, 10))
@@ -376,24 +460,27 @@ class App(tk.Tk):
         f = ttk.Frame(self, padding=(12, 12, 6, 12))
         f.grid(row=2, column=0, sticky="nsew")
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(3, weight=1)
 
         # -- which window + start / stop
         wc, wf = theme.card(f, "Local window")
         wc.grid(row=0, column=0, sticky="ew")
         wf.columnconfigure(0, weight=1, uniform="btn")
         wf.columnconfigure(1, weight=1, uniform="btn")
+        ttk.Label(wf, text="EVE client  (locks to that window; only its screen area is read)",
+                  style="Card.Muted.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.client_combo = ttk.Combobox(wf, textvariable=self.client_choice, state="readonly", width=40)
+        self.client_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.client_combo.bind("<<ComboboxSelected>>", lambda e: self.pick_client(self.client_combo.current()))
+        ttk.Label(wf, text="Local window", style="Card.Muted.TLabel").grid(row=2, column=0, columnspan=2,
+                                                                          sticky="w", pady=(8, 0))
         self.combo = ttk.Combobox(wf, textvariable=self.choice, state="readonly", width=40)
-        self.combo.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.combo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.select(self.combo.current()))
-        ttk.Checkbutton(wf, text="Lock to this account's window (pause if it disappears)",
-                        variable=self.lock, style="Card.TCheckbutton").grid(row=1, column=0, columnspan=2,
-                                                                            sticky="w", pady=(8, 0))
         ttk.Button(wf, text="Find Local windows", command=lambda: self.find_windows(True)).grid(
-            row=2, column=0, sticky="ew", padx=(0, 4), pady=(12, 0))
+            row=4, column=0, sticky="ew", padx=(0, 4), pady=(12, 0))
         self.toggle = ttk.Button(wf, text="Start watching", command=self.toggle_watch, state="disabled",
                                  style="Primary.TButton")
-        self.toggle.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
+        self.toggle.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
 
         # -- status + live preview
         sc, sf = theme.card(f, "Status")
@@ -439,18 +526,6 @@ class App(tk.Tk):
         ttk.Spinbox(every, from_=0.2, to=60, increment=0.5, width=6, textvariable=self.interval).pack(side="left")
         ttk.Label(every, text="seconds", style="Card.Muted.TLabel").pack(side="left", padx=(8, 0))
 
-        # -- session list
-        lc, lf = theme.card(f, "Local", "this session")
-        lc.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
-        lf.columnconfigure(0, weight=1)
-        lf.rowconfigure(0, weight=1)
-        self.listbox = tk.Listbox(lf, height=6, width=50, activestyle="none")
-        theme.style_text(self.listbox)
-        sb = ttk.Scrollbar(lf, orient="vertical", command=self.listbox.yview)
-        self.listbox.config(yscrollcommand=sb.set)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        sb.grid(row=0, column=1, sticky="ns", padx=(4, 0))
-
         # -- intel feed (right-hand side): tails EVE's own chat log files for channels named *intel*
         self.intel = intel.IntelFeed()
         self.intel_status = tk.StringVar(value="Looking for intel chat logs…")
@@ -458,8 +533,23 @@ class App(tk.Tk):
         rc = ttk.PanedWindow(self, orient="vertical")      # drag the divider to resize map vs feed
         rc.grid(row=2, column=1, sticky="nsew", padx=(6, 12), pady=12)
         self.build_map(rc)
-        ic, inf = theme.card(rc, "Intel feed", "times are EVE time")
-        rc.add(ic, weight=1)
+        feeds = ttk.PanedWindow(rc, orient="horizontal")   # Local list | intel feed, drag to resize
+        rc.add(feeds, weight=1)
+
+        # -- session list, beside the intel feed
+        lc, lf = theme.card(feeds, "Local", "this session")
+        feeds.add(lc, weight=1)
+        lf.columnconfigure(0, weight=1)
+        lf.rowconfigure(0, weight=1)
+        self.listbox = tk.Listbox(lf, height=6, width=34, activestyle="none")
+        theme.style_text(self.listbox)
+        sb = ttk.Scrollbar(lf, orient="vertical", command=self.listbox.yview)
+        self.listbox.config(yscrollcommand=sb.set)
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+
+        ic, inf = theme.card(feeds, "Intel feed", "times are EVE time")
+        feeds.add(ic, weight=2)
         inf.rowconfigure(1, weight=1)
         inf.columnconfigure(0, weight=1)
         ttk.Label(inf, textvariable=self.intel_status, wraplength=560, style="Card.Muted.TLabel").grid(
@@ -498,12 +588,13 @@ class App(tk.Tk):
             self.status.set(f"Updated to v{VERSION}.")
         if updater.is_frozen() and "--updated" not in sys.argv and "--no-update" not in sys.argv:
             self.after(1500, self.start_update)             # check GitHub for a newer release
+        self.after(200, self.refresh_clients)
         self.after(300, self.find_windows)          # look for Local windows on launch
 
     def place_away_from_game(self):
         """Put this window on the monitor where it covers the least of the EVE client(s)."""
         try:
-            clients = [r for _, r in eve_clients()]
+            clients = [c[1] for c in eve_clients()]
             w, h = 1180, 840
             best = None
             for mx, my, mw, mh in monitors():
@@ -603,10 +694,15 @@ class App(tk.Tk):
             return
         self.scan_result = None
         self.scan_for_watch = for_watch
+        if self.lock_hwnd:                                # client restarted: same account, new window
+            c = find_client(self.lock_hwnd, self.lock_account)
+            if c:
+                self.lock_account, self.lock_hwnd = c[0], c[2]
+        hwnd = self.lock_hwnd
 
         def work():
             try:
-                self.scan_result = scan_screens()
+                self.scan_result = scan_screens(hwnd)
             except Exception as ex:
                 self.scan_result = ex
 
@@ -629,7 +725,8 @@ class App(tk.Tk):
             self.auto_search = True
         if self.running or not self.auto_search:
             return
-        self.status.set("Searching all screens for Local chat windows…")
+        self.status.set(f"Searching {self.lock_account}'s client for Local chat…" if self.lock_hwnd
+                        else "Searching all screens for Local chat windows…")
         self.set_state("SEARCHING", "search")
         self.start_scan(False)
 
@@ -649,7 +746,13 @@ class App(tk.Tk):
             self.combo.set("")
             self.toggle.config(state="disabled")
             self.hide_outline()
-            self.status.set("Searching for Local chat… make sure the Local tab and its member list are visible.")
+            state = client_state(self.lock_hwnd) if self.lock_hwnd else "open"
+            if state == "minimized":
+                self.status.set(f"{self.lock_account}'s client is minimized - restore it so Local is on screen.")
+            elif state == "gone":
+                self.status.set(f"{self.lock_account}'s client is not running - waiting for it to come back.")
+            else:
+                self.status.set("Searching for Local chat… make sure the Local tab and its member list are visible.")
             self.set_state("SEARCHING", "search")
             self.after(3000, self.find_windows)           # keep looking until it shows up
             return
@@ -665,13 +768,66 @@ class App(tk.Tk):
         if not (0 <= idx < len(self.windows)):
             return
         self.current = dict(self.windows[idx])
-        self.lock_account = self.current.get("account", "")
+        if not self.lock_hwnd:
+            self.lock_account = self.current.get("account", "")
         self.toggle.config(state="normal")
         if self.running:                                  # switched window while watching: start over on it
             self.start()
             return
         self.show_outline(theme.WARN)
         self.show_preview(self.grab())
+
+    # ---- EVE client lock -----------------------------------------------------------------------
+    def refresh_clients(self):
+        """Keep the client picker in step with the EVE windows that are open (window titles only)."""
+        try:
+            self.clients = eve_clients(include_minimized=True)
+            if self.lock_hwnd and not any(c[2] == self.lock_hwnd for c in self.clients):
+                c = next((c for c in self.clients if c[0] == self.lock_account), None)
+                if c:                                     # same account, restarted client
+                    self.lock_hwnd = c[2]
+            names = [c[0] + ("  (minimized)" if client_state(c[2]) == "minimized" else "") for c in self.clients]
+            values = [ANY_CLIENT] + names
+            if self.lock_hwnd and not any(c[2] == self.lock_hwnd for c in self.clients):
+                values.append(f"{self.lock_account}  (not running)")
+            self.client_combo["values"] = values
+            if not self.lock_hwnd:
+                self.client_combo.current(0)
+            else:
+                i = next((i for i, c in enumerate(self.clients) if c[2] == self.lock_hwnd), len(values) - 2)
+                self.client_combo.current(i + 1)
+        except Exception as ex:
+            log(f"CLIENT LIST ERROR {ex!r}")
+        if wgc:
+            wgc.release(keep=self.lock_hwnd)              # drop captures of clients no longer locked / closed
+        self.after(3000, self.refresh_clients)
+
+    def pick_client(self, idx):
+        """Lock to one EVE client (or any) and search for its Local from scratch."""
+        if 1 <= idx <= len(self.clients):
+            account, _, hwnd = self.clients[idx - 1]
+        elif idx == 0:
+            account, hwnd = "", None
+        else:
+            return                                        # the '(not running)' entry: keep the current lock
+        if hwnd == self.lock_hwnd:
+            return
+        self.lock_account, self.lock_hwnd = account, hwnd
+        if wgc:
+            wgc.release(keep=hwnd)                        # stop capturing the previously locked client
+        log(f"LOCK {'to ' + account if hwnd else 'released (any client)'}")
+        if self.job:
+            self.after_cancel(self.job)
+            self.job = None
+        self.running = False
+        self.paused = False
+        self.current = None
+        self.windows = []
+        self.combo["values"] = []
+        self.combo.set("")
+        self.toggle.config(text="Start watching", style="Primary.TButton", state="disabled")
+        self.hide_outline()
+        self.find_windows(True)
 
     # ---- mini map ----------------------------------------------------------------------------
     def build_map(self, parent):
@@ -701,7 +857,7 @@ class App(tk.Tk):
         try:                                              # fill the screen that covers the least of the game / app
             app = (self.winfo_rootx(), self.winfo_rooty(),
                    self.winfo_rootx() + self.winfo_width(), self.winfo_rooty() + self.winfo_height())
-            clients = [r for _, r in eve_clients()]
+            clients = [c[1] for c in eve_clients()]
 
             def covered(m, rects):
                 mx, my, mw, mh = m
@@ -945,7 +1101,7 @@ class App(tk.Tk):
         self.preview.config(image=self.thumb, text="")
 
     def grab(self):
-        return grab_region(self.current["list"])
+        return grab_box(self.current["list"], self.lock_hwnd)
 
     # ---- watching --------------------------------------------------------------------------
     def toggle_watch(self):
@@ -997,9 +1153,7 @@ class App(tk.Tk):
             res = []
         self.windows = res
         self.combo["values"] = [self.label(w, i) for i, w in enumerate(res, 1)]
-        cands = res
-        if self.lock.get() and self.lock_account:
-            cands = [w for w in res if w.get("account") == self.lock_account]
+        cands = res                                       # (a locked scan only returns the locked client's Local)
         if not cands:
             self.misses += 1
             if self.misses >= 2 and not self.paused:
@@ -1009,7 +1163,7 @@ class App(tk.Tk):
         cx, cy = self.current["tab"]
         best = min(cands, key=lambda w: math.hypot(w["tab"][0] - cx, w["tab"][1] - cy))
         self.combo.set(self.label(best, res.index(best) + 1))
-        if not self.lock.get():
+        if not self.lock_hwnd:
             self.lock_account = best.get("account", "")
         old_sys, new_sys = self.current["system"], best["system"]
         best = dict(best)
@@ -1060,11 +1214,17 @@ class App(tk.Tk):
         self.names_text.set("")
         who = self.lock_account or "the Local"
         tx, ty = self.current["tab"]
-        covered = (self.winfo_rootx() <= tx <= self.winfo_rootx() + self.winfo_width()
+        covered = (not self.lock_hwnd                    # a locked client is read even when covered
+                   and self.winfo_rootx() <= tx <= self.winfo_rootx() + self.winfo_width()
                    and self.winfo_rooty() <= ty <= self.winfo_rooty() + self.winfo_height())
+        state = client_state(self.lock_hwnd) if self.lock_hwnd else "open"
         if covered:
             self.status.set("PAUSED - this window is covering the Local tab. Move it off the game "
                             "(e.g. to another monitor); it resumes automatically.")
+        elif state == "minimized":
+            self.status.set(f"PAUSED - {who}'s client is minimized. Resumes automatically when it is restored.")
+        elif state == "gone":
+            self.status.set(f"PAUSED - {who}'s client closed. Resumes automatically when it is back.")
         else:
             self.status.set(f"PAUSED - {who} window not found. Will resume automatically when it reappears.")
         log(f"PAUSED: {self.lock_account or 'window'} disappeared")
@@ -1117,7 +1277,16 @@ class App(tk.Tk):
                     self.start_scan(True)
                 self.job = self.after(1000, self.tick)
                 return
-            if now - self.last_relocate >= RELOCATE_EVERY:
+            moved = False
+            if self.lock_hwnd and self.current.get("client_rect"):    # locked client moved / resized / minimized
+                r = ctypes.wintypes.RECT()
+                if ctypes.windll.user32.IsIconic(self.lock_hwnd) or not ctypes.windll.user32.GetWindowRect(
+                        self.lock_hwnd, ctypes.byref(r)):
+                    self.misses = 1
+                    moved = True
+                elif (r.left, r.top, r.right, r.bottom) != tuple(self.current["client_rect"]):
+                    moved = True
+            if moved or now - self.last_relocate >= RELOCATE_EVERY:
                 self.last_relocate = now
                 self.start_scan(True)
             if self.check_thread and self.check_thread.is_alive():      # previous check still running
@@ -1125,13 +1294,14 @@ class App(tk.Tk):
                 return
             # screen capture + OCR (~150 ms) run on a worker so the window stays responsive
             tab, box, known = self.current["tab"], self.current["list"], set(self.known or ())
+            hwnd = self.lock_hwnd
             res = {}
 
             def work():
                 try:
-                    res["visible"] = local_tab_visible(tab)
+                    res["visible"] = local_tab_visible(tab, hwnd)
                     if res["visible"]:
-                        res["img"] = grab_region(box)
+                        res["img"] = grab_box(box, hwnd)
                         res["read"] = read_names(res["img"], known)
                 except Exception as ex:
                     res["error"] = ex

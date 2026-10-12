@@ -1,3 +1,3 @@
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 REPO = "boxxykiller/packysackyintel"
 ASSET_NAME = "The Packy Sacky Intel Tool.exe"

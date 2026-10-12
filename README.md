@@ -3,7 +3,15 @@
 A Windows desktop tool for EVE Online that watches your Local chat and your intel channels.
 
 - **Finds Local by itself.** Pure screen OCR (Windows built-in OCR) - it does not attach to or read the game.
-  Works with several clients; each is labelled with its account name and can be locked to.
+  Works with several clients; each is labelled with its account name.
+- **Lock to one client.** Pick an EVE client from the list and only that client's window is read - even when
+  it is covered by another EVE client or any other window. This uses Windows Graphics Capture, the same window
+  capture OBS and Discord use: Windows hands over the picture of the window it already has. It follows the
+  window if it moves or resizes, and pauses while it is minimized or closed, resuming on its own.
+- **No interaction with the game (EULA).** Clients are found from Windows' own list of open windows (title
+  `EVE - <account>`, position, minimized or not). The tool never opens, attaches to, reads the memory of,
+  injects into, or sends input or messages to the EVE client - it only looks at the window's pixels, the
+  same picture a screen recorder gets.
 - **Alerts on neutral / hostile only.** Reads the standing icon next to each name; corp (green), fleet (purple)
   and allies (blue) are ignored. Spoken message, siren, optional popup.
 - **Local list** of everyone seen this session, newcomers highlighted.
@@ -19,7 +27,9 @@ Requires Windows 10/11 and Python 3.11+.
 ```
 pip install pillow winrt-runtime winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging ^
     winrt-Windows.Storage.Streams winrt-Windows.Foundation winrt-Windows.Foundation.Collections ^
-    winrt-Windows.Globalization
+    winrt-Windows.Globalization winrt-Windows.Graphics winrt-Windows.Graphics.Capture ^
+    winrt-Windows.Graphics.Capture.Interop winrt-Windows.Graphics.DirectX ^
+    winrt-Windows.Graphics.DirectX.Direct3D11 winrt-Windows.Graphics.DirectX.Direct3D11.Interop
 python screenwatch.py
 ```
 

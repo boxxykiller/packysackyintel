@@ -9,7 +9,8 @@ VIEW_REGION = "Whole region"
 BG = theme.WELL
 HUB_COLORS = {"Thera": theme.VIOLET, "Turnur": theme.CYAN}
 SEC_COLORS = ("#4ADE80", "#F59E0B", "#F43F5E")          # high / low / null sec
-GATE = "#1C2B44"
+GATE = "#3A5378"
+NAME = "#C3CEDF"
 
 
 class MapView(ttk.Frame):
@@ -28,6 +29,7 @@ class MapView(ttk.Frame):
         self.details = tk.BooleanVar(value=False)      # report / wormhole text under the map (off = bigger map)
         self.zoom, self.pan = 1.0, [0.0, 0.0]
         self.drawn = []                      # [(x, y, system id)] for hover lookups
+        self._layout = (None, {})            # (key, {system id: (x, y)}) schematic positions, see layout()
         self._drag = None
 
         self.columnconfigure(0, weight=1)
@@ -142,6 +144,60 @@ class MapView(ttk.Frame):
         return out
 
     # ---- drawing ---------------------------------------------------------------------------
+    def layout(self, ids, cur, aspect):
+        """Schematic positions in -1..1, filling the map. Starts from the real star map, stretched to
+        fill the view, then pushes systems apart (and pulls gate neighbours together) so nothing overlaps.
+        Cached until the system set or the shape of the map changes, so zoom / pan stay instant."""
+        key = (cur, tuple(sorted(ids)), round(aspect, 1))
+        if self._layout[0] == key:
+            return self._layout[1]
+        u = self.app.uni
+        cx, cy = u.sys[cur]["x"], u.sys[cur]["y"]
+        dx = max((abs(u.sys[s]["x"] - cx) for s in ids), default=0) or 1
+        dy = max((abs(u.sys[s]["y"] - cy) for s in ids), default=0) or 1
+        home = {s: [(u.sys[s]["x"] - cx) / dx * aspect, (u.sys[s]["y"] - cy) / dy] for s in ids}
+        p = {s: list(v) for s, v in home.items()}
+        idset = set(ids)
+        links = [(a, b) for a in ids for b in u.adj.get(a, ()) if b in idset and a < b]
+        gap = 1.9 / max(2.0, len(ids) ** 0.5)               # wanted spacing between neighbouring systems
+        order = list(ids)
+        for it in range(80):
+            step = 0.5 * (1 - it / 80) + 0.05
+            move = {s: [0.0, 0.0] for s in ids}
+            for i, a in enumerate(order):                   # push apart anything closer than `gap`
+                ax, ay = p[a]
+                for b in order[i + 1:]:
+                    vx, vy = ax - p[b][0], ay - p[b][1]
+                    d2 = vx * vx + vy * vy
+                    if d2 < gap * gap:
+                        d = d2 ** 0.5 or 1e-6
+                        f = (gap - d) / d * 0.5
+                        move[a][0] += vx * f
+                        move[a][1] += vy * f
+                        move[b][0] -= vx * f
+                        move[b][1] -= vy * f
+            for a, b in links:                              # gates: keep neighbours near each other
+                vx, vy = p[b][0] - p[a][0], p[b][1] - p[a][1]
+                d = (vx * vx + vy * vy) ** 0.5
+                if d > gap * 1.6:
+                    f = (d - gap * 1.6) / d * 0.15
+                    move[a][0] += vx * f
+                    move[a][1] += vy * f
+                    move[b][0] -= vx * f
+                    move[b][1] -= vy * f
+            for s in ids:                                   # and a gentle pull back to the real geography
+                move[s][0] += (home[s][0] - p[s][0]) * 0.03
+                move[s][1] += (home[s][1] - p[s][1]) * 0.03
+                if s != cur:
+                    p[s][0] += move[s][0] * step
+                    p[s][1] += move[s][1] * step
+        xs, ys = [v[0] for v in p.values()], [v[1] for v in p.values()]   # fill the whole map area
+        mx, my = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        hx, hy = (max(xs) - min(xs)) / 2 or 1, (max(ys) - min(ys)) / 2 or 1
+        out = {s: ((v[0] - mx) / hx, (v[1] - my) / hy) for s, v in p.items()}
+        self._layout = (key, out)
+        return out
+
     def draw(self):
         app, c = self.app, self.canvas
         c.delete("all")
@@ -176,16 +232,12 @@ class MapView(ttk.Frame):
         else:
             ids = [s for s in u.by_region[region] if u.sys[s]["x"] is not None]
             pad = 40
-        # centre on the current system and zoom so everything in the view still fits around it
-        cx, cy = u.sys[cur]["x"], u.sys[cur]["y"]
-        dx = max((abs(u.sys[s]["x"] - cx) for s in ids), default=0) or 1
-        dy = max((abs(u.sys[s]["y"] - cy) for s in ids), default=0) or 1
-        k0 = min((W / 2 - pad) / dx, (H / 2 - pad) / dy)
-        k = k0 * self.zoom
+        # schematic layout centred on the current system, stretched to fill the whole map area
+        lay = self.layout(ids, cur, (W - 2 * pad) / max(1, H - 2 * pad))
+        kx, ky = (W / 2 - pad - 40) * self.zoom, (H / 2 - pad) * self.zoom
 
         def pos(s):
-            return (W / 2 + self.pan[0] + (u.sys[s]["x"] - cx) * k,
-                    H / 2 + self.pan[1] - (u.sys[s]["y"] - cy) * k)
+            return W / 2 + self.pan[0] + lay[s][0] * kx, H / 2 + self.pan[1] - lay[s][1] * ky
 
         idset = set(ids)
         live = app.live_reports()
@@ -193,12 +245,12 @@ class MapView(ttk.Frame):
         for a in ids:                                                  # gates
             for b in u.adj.get(a, ()):
                 if b in idset and a < b:
-                    c.create_line(*pos(a), *pos(b), fill=GATE, width=1)
+                    c.create_line(*pos(a), *pos(b), fill=GATE, width=2 if len(ids) <= 80 else 1)
         fs = self.fontsize.get()
-        small = ("Segoe UI", max(6, fs - 2))
+        small = ("Segoe UI", max(7, fs - 1))
         bold = ("Segoe UI", fs, "bold")
-        radius = 3 if len(ids) > 120 else 4
-        show_names = self.names.get() and (self.zoom >= 1.0 or len(ids) <= 80)
+        radius = 4 if len(ids) > 120 else 5
+        show_names = self.names.get()
         for s in ids:                                                  # systems, coloured by security
             sec = u.sys[s]["sec"]
             col = SEC_COLORS[0] if sec >= 0.45 else SEC_COLORS[1] if sec > 0 else SEC_COLORS[2]
@@ -210,9 +262,6 @@ class MapView(ttk.Frame):
                 c.create_oval(x - radius, y - radius, x + radius, y + radius, fill=col, outline="")
             else:                                                      # other region: hollow dot
                 c.create_oval(x - radius, y - radius, x + radius, y + radius, outline=col, width=1)
-            if show_names and s != cur and s not in reported:
-                c.create_text(x + radius + 3, y, text=u.sys[s]["name"], fill=theme.MUTED, anchor="w", font=small,
-                              tags="sysname")
 
         placed = []
 
@@ -222,7 +271,8 @@ class MapView(ttk.Frame):
                                    (0, -17, "s"), (0, 17, "n"), (11, -26, "w"), (11, 26, "w")):
                 t = c.create_text(x + dx, y + dy, text=text, fill=fill, anchor=anchor, font=bold, tags="lbl")
                 l, tp, r, b = c.bbox(t)
-                clash = any(not (r < pl or l > pr or b < pt or tp > pb) for pl, pt, pr, pb in placed)
+                clash = (any(not (r < pl or l > pr or b < pt or tp > pb) for pl, pt, pr, pb in placed)
+                         or l < 4 or r > W - 4 or tp < 2 or b > H - 2)            # keep it inside the map
                 if not clash or (dx, dy) == (11, 26):
                     placed.append((l - 2, tp - 1, r + 2, b + 1))
                     c.create_rectangle(l - 4, tp - 1, r + 4, b + 1, fill=theme.SURFACE, outline=theme.BORDER,
@@ -248,6 +298,25 @@ class MapView(ttk.Frame):
             col = HUB_COLORS.get(w["hub"], theme.VIOLET)
             c.create_polygon(x, y - 9, x + 9, y, x, y + 9, x - 9, y, outline=col, fill="", width=2)
             put_label(x, y, f"{w['hub']} {w['hours']}h", col)
+        if show_names:
+            # each name goes right, left, above or below its dot - wherever it covers no label, name or other
+            # dot; if there is no room it is left out (zoom in, or hover the dot, to see it)
+            names = sorted((t for t in self.drawn if t[2] != cur and t[2] not in reported),
+                           key=lambda t: (t[0] - cxp) ** 2 + (t[1] - cyp) ** 2)        # closest to you first
+            for x, y, s in names:
+                for ox, oy, anchor in ((radius + 3, 0, "w"), (-radius - 3, 0, "e"), (0, -radius - 2, "s"),
+                                       (0, radius + 2, "n")):
+                    t = c.create_text(x + ox, y + oy, text=u.sys[s]["name"], fill=NAME, anchor=anchor, font=small,
+                                      tags="sysname")
+                    l, tp, r, b = c.bbox(t)
+                    hits_label = any(not (r < pl or l > pr or b < pt or tp > pb) for pl, pt, pr, pb in placed)
+                    hits_dot = any(l - radius <= dx_ <= r + radius and tp - radius <= dy_ <= b + radius
+                                   for dx_, dy_, s2 in self.drawn if s2 != s)
+                    if not hits_label and not hits_dot:
+                        placed.append((l - 2, tp - 1, r + 2, b + 1))
+                        break
+                    c.delete(t)
+
         c.tag_raise("chip")
         c.tag_raise("lbl")
         c.create_oval(cxp - 14, cyp - 14, cxp + 14, cyp + 14, outline=theme.mix(BG, theme.PRIMARY, .35), width=2)

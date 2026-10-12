@@ -1,7 +1,7 @@
 """Find EVE 'Local' chat windows on a screenshot using OCR + simple line detection (no game attachment)."""
 import re
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageOps
 
 import ocr
 
@@ -74,21 +74,52 @@ _COUNT_RE = re.compile(r"^\W{0,2}(\d{1,4})$")        # member-count header: pers
 
 
 def _member_header(img, tx, ty, th, count):
-    """Find the member list's header (person icon + member count) in the strip just under the tab row, on
-    either side of the tab. Returns (x, top, bottom) of the number, or None. Nothing about the window's size
-    or layout is assumed: chat windows are resized, narrowed and rearranged differently by every player."""
+    """Find the member list's header (person icon + member count) in the strip just under the tab row.
+    Returns (x, top, bottom) of the number, or None. EVE always puts a channel's member list on the right of
+    its chat, so only the right of the tab is searched - a neighbouring chat window to the left has its own
+    member list (and count) that must never be mistaken for Local's. Nothing about the window's size is
+    assumed: chat windows are resized and narrowed differently by every player."""
     W, H = img.size
-    box = (max(0, int(tx - 1200)), int(ty + th + 2), min(W, int(tx + 1400)), min(H, int(ty + th + 6 * th + 30)))
+    box = (int(tx), int(ty + th + 2), min(W, int(tx + 140 * th)), min(H, int(ty + th + 6 * th + 30)))
     if box[2] - box[0] < 20 or box[3] - box[1] < 8:
         return None
     hits = []
-    for ln in ocr.recognize(img.crop(box), 3):
+    strip = ImageOps.autocontrast(img.crop(box).convert("L")).convert("RGB")     # the count is dim grey text
+    for ln in ocr.recognize(strip, 3):
         for w in ln:
             m = _COUNT_RE.match(w[0])
             if m and (count is None or int(m.group(1)) == count):
                 hits.append((box[0] + w[1], box[1] + w[2], box[1] + w[2] + w[4]))
-    # closest to the tab row first (chat lines further down can contain bare numbers too)
-    return min(hits, key=lambda h: (h[1], abs(h[0] - tx)), default=None)
+    # closest to the tab row first (chat lines further down can contain bare numbers too), then nearest the tab
+    return min(hits, key=lambda h: (round(h[1] / th), h[0] - tx), default=None)
+
+
+def _vline_extent(gray, x, y, th):
+    """How far a vertical window line at column x (passing through row y) runs up and down: (top, bottom).
+    Short breaks (up to ~1.5 text lines) are bridged."""
+    W, H = gray.size
+    xs = range(max(0, x - 2), min(W - 1, x + 3))
+
+    def edge(yy):
+        return any(abs(gray.getpixel((xx, yy)) - gray.getpixel((xx + 1, yy))) > 10 for xx in xs)
+
+    gap = int(th * 1.5) + 1
+    ends = []
+    for step, stop in ((-1, -1), (1, H)):
+        end, miss, yy = y, 0, y
+        while miss <= gap:
+            yy += step
+            if yy == stop:
+                break
+            if edge(yy):
+                end, miss = yy, 0
+            else:
+                miss += 1
+        ends.append(end)
+    return ends[0], ends[1]
+
+
+DEBUG = []           # details of the last search, for the log
 
 
 def find_local_windows(img):
@@ -105,28 +136,42 @@ def find_local_windows(img):
         if _tab_words(lines):
             break
     found = []
+    DEBUG.clear()
     for tab_word in _tab_words(lines):
         tx, ty, tw, th = tab_word[1:]
         count = _tab_count(lines, tab_word)
-        head = _member_header(img, tx, ty, th, count) or (count is not None and _member_header(img, tx, ty, th, None))
+        # the header must show the tab's member count; only if the tab's count is unreadable is any number
+        # taken (then the nearest one right of the tab)
+        head = _member_header(img, tx, ty, th, count)
+        left = []
         if head:
             hx, htop, hbot = head
             band_t, band_b = int(hbot + th), int(min(H, hbot + th * 8))      # a band of list rows under the header
             left = _fraction_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b), "v")
-            div = left[-1] if left else int(hx - 2.6 * th)                   # line just left of the header
+        if left:
+            div = left[-1]                                                   # line just left of the header
             y0 = int(hbot + 3)
         else:                                                                # header hidden: older fallback
+            head = None
             band_t, band_b = int(ty + 3 * th), int(min(H, ty + 11 * th))
             left = _fraction_lines(gray, (int(tx + tw + 4), band_t, min(W - 1, int(tx + 100 * th)), band_b), "v")
             if not left:
                 continue
             div = left[0]
-            y0 = int(ty + 2.5 * th)
-        x0 = div + 3
+            y0 = None
+        ext_top, ext_bot = _vline_extent(gray, div, (band_t + band_b) // 2, th)
+        if y0 is None:                                                       # list starts where the divider does
+            y0 = max(int(ty + 1.5 * th), ext_top + 2)                        # (a header row read as a name is
+        x0 = div + 3                                                         # dropped: it is only digits)
         right = _fraction_lines(gray, (int(x0 + 4 * th), band_t, min(W - 1, int(x0 + 60 * th)), band_b), "v")
         x1 = (right[0] - 2) if right else min(W - 1, int(x0 + 22 * th))
-        horiz = _fraction_lines(gray, (x0, int(y0 + 2 * th), x1, H), "h")    # bottom of the panel
-        y1 = horiz[0] - 1 if horiz else H
+        # bottom of the panel = a line that runs on past the divider into the chat side. Member rows can have
+        # their own highlighted backgrounds whose edges stop at the list, so those never end the list early.
+        horiz = _fraction_lines(gray, (max(0, int(div - 2 * th)), int(y0 + th), x1, H), "h")
+        y1 = horiz[0] - 1 if horiz else (ext_bot if ext_bot - y0 > 3 * th else H)
+        DEBUG.append(f"tab=({tx:.0f},{ty:.0f}) th={th:.0f} count={count} header={head} div={div} "
+                     f"right={right[:1]} divider_runs={ext_top}-{ext_bot} bottom_lines={horiz[:2]} "
+                     f"-> list=({x0},{y0},{x1},{y1})")
         if x1 - x0 < 4 * th or y1 - y0 < 2 * th:
             continue
         system = ""

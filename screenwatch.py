@@ -351,6 +351,19 @@ def read_names(img, known=()):  # -> (names, unsure rows, clipped names)
     return out, unsure, clipped
 
 
+_last_debug = [None]
+
+
+def find_local(img):
+    """locator.find_local_windows, logging what it measured whenever that changes (to diagnose misses)."""
+    found = locator.find_local_windows(img)
+    text = " | ".join(locator.DEBUG)
+    if text and text != _last_debug[0]:
+        _last_debug[0] = text
+        log(f"LOCAL SEARCH {text}")
+    return found
+
+
 def scan_screens(lock_hwnd=None):
     """Find every visible Local chat. Returns [{'system','tab','list','monitor','account','hwnd'}] in screen coords.
     With lock_hwnd only that client's window area is captured, and only a Local that is on that client counts."""
@@ -362,7 +375,7 @@ def scan_screens(lock_hwnd=None):
     got = window_capture(lock[2]) if lock else None
     if got is not None:                                   # the locked client's own image: covered or not
         img, (ox, oy) = got
-        for w in locator.find_local_windows(img):
+        for w in find_local(img):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
             results.append({"system": w["system"], "monitor": 0, "account": lock[0], "hwnd": lock[2],
@@ -378,7 +391,7 @@ def scan_screens(lock_hwnd=None):
                 continue
         ox, oy = area[0], area[1]
         img = grab_region(area)
-        for w in locator.find_local_windows(img):
+        for w in find_local(img):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
             px, py = ox + tx, oy + ty

@@ -5,6 +5,7 @@ from tkinter import ttk
 VIEW_NEARBY = "Nearby systems"
 VIEW_REGION = "Whole region"
 BG = "#0b0e14"
+HUB_COLORS = {"Thera": "#b07cff", "Turnur": "#35c9d8"}
 
 
 class MapView(ttk.Frame):
@@ -15,6 +16,7 @@ class MapView(ttk.Frame):
         self.view = tk.StringVar(value=VIEW_NEARBY)
         self.jumps = tk.IntVar(value=6)
         self.names = tk.BooleanVar(value=True)
+        self.show_wh = tk.BooleanVar(value=True)
         self.fontsize = tk.IntVar(value=10)
         self.info = tk.StringVar(value="Waiting for your current system…")
         self.report = tk.StringVar(value="")
@@ -35,6 +37,7 @@ class MapView(ttk.Frame):
         ttk.Label(bar, text="Text").pack(side="left", padx=(8, 2))
         ttk.Spinbox(bar, from_=7, to=22, width=3, textvariable=self.fontsize, command=self.draw).pack(side="left")
         ttk.Checkbutton(bar, text="Names", variable=self.names, command=self.draw).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(bar, text="Wormholes", variable=self.show_wh, command=self.draw).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Fit", width=4, command=self.refit).pack(side="left", padx=(8, 0))
         if not popout:
             ttk.Button(bar, text="Pop out", command=app.pop_out_map).pack(side="right")
@@ -87,7 +90,25 @@ class MapView(ttk.Frame):
         s = u.sys[sid]
         d = u.distances(self.app.cur_sid).get(sid) if self.app.cur_sid else None
         far = "" if d is None else "  -  here" if d == 0 else f"  -  {d} jump{'s' if d != 1 else ''}"
-        self.hover.set(f"{s['name']}  ({u.regions.get(s['region'], '?')}, security {s['sec']:.1f}){far}")
+        holes = "".join(f"   |   {w['hub']} wormhole {w['sig_in'] or ''}: {w['hours']}h left, {w['size']}"
+                        for w in self.app.wormholes if w["sid"] == sid)
+        self.hover.set(f"{s['name']}  ({u.regions.get(s['region'], '?')}, security {s['sec']:.1f}){far}{holes}")
+
+    def wormhole_summary(self, dist):
+        """Lines about the active Thera / Turnur holes: counts, and the nearest few by gate jumps."""
+        holes = self.app.wormholes
+        if not holes or not self.show_wh.get():
+            return []
+        hubs = {}
+        for w in holes:
+            hubs[w["hub"]] = hubs.get(w["hub"], 0) + 1
+        head = "Wormholes: " + ", ".join(f"{n} {h}" for h, n in sorted(hubs.items())) + " active"
+        reach = sorted(((dist[w["sid"]], w) for w in holes if w["sid"] in dist), key=lambda t: t[0])[:3]
+        out = [head]
+        for d, w in reach:
+            out.append(f"   {w['hub']} -> {w['name']} ({w['region']}): {d} jump{'s' if d != 1 else ''}, "
+                       f"{w['hours']}h left, {w['size']}")
+        return out
 
     # ---- drawing ---------------------------------------------------------------------------
     def draw(self):
@@ -191,6 +212,12 @@ class MapView(ttk.Frame):
                 put_label(x, y, label, "#ff8080")
             elif sid != cur:
                 off_map.append(label)
+        wh_here = [w for w in app.wormholes if w["sid"] in idset] if self.show_wh.get() else []
+        for w in wh_here:
+            x, y = pos(w["sid"])
+            col = HUB_COLORS.get(w["hub"], "#b07cff")
+            c.create_polygon(x, y - 9, x + 9, y, x, y + 9, x - 9, y, outline=col, fill="", width=2)
+            put_label(x, y, f"{w['hub']} {w['hours']}h", col)
         c.tag_raise("chip")
         c.tag_raise("lbl")
         c.create_oval(cxp - 10, cyp - 10, cxp + 10, cyp + 10, outline="#ffffff", width=2)
@@ -207,4 +234,5 @@ class MapView(ttk.Frame):
             lines.append(f"{u.sys[sid]['name']}: {far} ({when}m ago)")
         if off_map:
             lines.append("Not on this view: " + ", ".join(off_map))
+        lines += self.wormhole_summary(dist)
         self.report.set("\n".join(lines) if lines else "No recent intel reports.")

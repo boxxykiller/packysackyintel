@@ -30,6 +30,7 @@ import minimap
 import ocr
 import universe
 import updater
+import wormholes
 from version import VERSION
 
 ALERT_STANDINGS = {"neutral", "hostile", "unknown"}      # corp (green), fleet (purple), allies (blue) are ignored
@@ -537,6 +538,8 @@ class App(tk.Tk):
         self.cur_sid = None
         self.reports = {}          # system id -> {"stamp", "sender", "text"} (latest report per system)
         self.maps = []
+        self.wormholes = []        # active Thera / Turnur connections (EVE-Scout)
+        self.after(2000, self.refresh_wormholes)
         mf = ttk.LabelFrame(parent, text="Mini map", padding=6)
         parent.add(mf, weight=3)
         mf.columnconfigure(0, weight=1)
@@ -562,6 +565,29 @@ class App(tk.Tk):
 
         win.protocol("WM_DELETE_WINDOW", closed)
         self.after(100, view.draw)
+
+    def refresh_wormholes(self):
+        """Every 5 minutes, fetch the active Thera / Turnur wormholes in the background and redraw the map."""
+        def work():
+            try:
+                self._wh_result = wormholes.fetch()
+            except Exception as ex:                          # offline / API down: keep the last list
+                self._wh_result = None
+                log(f"WORMHOLE FETCH FAILED {ex!r}")
+
+        self._wh_result = "pending"
+        threading.Thread(target=work, daemon=True).start()
+        self.after(500, self.poll_wormholes)
+
+    def poll_wormholes(self):
+        if self._wh_result == "pending":
+            self.after(500, self.poll_wormholes)
+            return
+        if self._wh_result is not None:
+            self.wormholes = self._wh_result
+            log(f"WORMHOLES {len(self.wormholes)} active")
+            self.draw_map()
+        self.after(300_000, self.refresh_wormholes)
 
     def report_ttl(self):
         return REPORT_TTL

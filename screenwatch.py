@@ -1,5 +1,6 @@
 """The Packy Sacky Intel Tool - finds the EVE Local chat on screen (pure OCR, no game attachment),
 tracks who is in it, and alerts when someone neutral / hostile enters."""
+import colorsys
 import ctypes
 import datetime
 import difflib
@@ -183,31 +184,44 @@ def is_cut_short(clipped, name, other):
 
 def classify_standing(img, x0, x1, yc):
     """Look at the standing icon (columns x0..x1) on a row. Returns corp / fleet / ally / hostile / neutral / unknown."""
+    return icon_standing(img, x0, x1, yc)[0]
+
+
+def icon_standing(img, x0, x1, yc):
+    """(standing, debug text). Classified by hue, so dark icons count too: EVE's icons are dim (green ~29,104,22,
+    blue ~8,29,96) and a purple fleet icon has two strong channels, so a fixed max-min gap misses it."""
     xa, xb = max(0, int(x0) - 1), min(img.width, int(x1) + 2)
     y0, y1 = max(0, int(yc) - 4), min(img.height, int(yc) + 5)
-    sat = [p for x in range(xa, xb) for y in range(y0, y1)
-           for p in [img.getpixel((x, y))] if max(p) - min(p) > 60]
-    if len(sat) < 8:
-        return "neutral"                                     # no icon = neutral
+    sat = []
+    for x in range(xa, xb):
+        for y in range(y0, y1):
+            p = img.getpixel((x, y))
+            hi, lo = max(p), min(p)
+            if hi >= 45 and hi - lo >= 28 and (hi - lo) / hi >= 0.4:      # coloured, not grey / white text
+                sat.append(p)
+    if len(sat) < 6:
+        return "neutral", f"icon px={len(sat)}"              # no icon = neutral
     r = sum(p[0] for p in sat) / len(sat)
     g = sum(p[1] for p in sat) / len(sat)
     b = sum(p[2] for p in sat) / len(sat)
-    if g > r * 1.3 and g > b * 1.3:
-        return "corp"                                        # green
-    if b > r * 1.3 and b > g * 1.3:
-        return "ally"                                        # blue
-    if r > g * 1.3 and b > g * 1.3:
-        return "fleet"                                       # purple
-    if r > g * 1.2 and r > b * 1.5:
-        return "hostile"                                     # orange / red
-    return "unknown"
+    hue = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360
+    info = f"icon px={len(sat)} rgb=({r:.0f},{g:.0f},{b:.0f}) hue={hue:.0f}"
+    if 80 <= hue < 170:
+        return "corp", info                                  # green
+    if 170 <= hue < 255:
+        return "ally", info                                  # blue (+5 / +10 / alliance)
+    if 255 <= hue < 335:
+        return "fleet", info                                 # purple / magenta
+    if hue >= 335 or hue < 50:
+        return "hostile", info                               # red / orange
+    return "unknown", info
 
 
 def icon_columns(img):
     """Horizontal extent (l, r) of the coloured standing icons in the left edge of the list, or None."""
     strip = img.crop((0, 0, min(img.width, 44), img.height)).convert("HSV")
     _, sat, val = strip.split()
-    mask = ImageChops.multiply(sat.point(lambda p: 255 if p > 110 else 0), val.point(lambda p: 255 if p > 70 else 0))
+    mask = ImageChops.multiply(sat.point(lambda p: 255 if p > 110 else 0), val.point(lambda p: 255 if p > 55 else 0))   # icons are dim
     per_col = mask.resize((mask.width, 1), Image.BOX)                 # mean 0..255 per column
     need = 6 * 255 / max(1, mask.height)                              # at least ~6 coloured pixels in the column
     hits = [x for x, v in enumerate(per_col.get_flattened_data() if hasattr(per_col, "get_flattened_data")
@@ -236,6 +250,9 @@ def _ocr_rows(img, left, scale, resample, sharpen):
             right = max(w[1] + w[3] for w in words) / scale + left
             rows.append((name, (top + bottom) / 2, top, bottom, right >= img.width - 5))
     return rows
+
+
+ICON_INFO = {}       # name -> icon colour details from the last read, for the log
 
 
 def read_names(img, known=()):  # -> (names, unsure rows, clipped names)
@@ -270,7 +287,7 @@ def read_names(img, known=()):  # -> (names, unsure rows, clipped names)
             continue
         pick = next((n for n in best if n in known), max(set(best), key=best.count))
         if pick not in out:
-            out[pick] = classify_standing(img, icon_l, icon_r, yc)
+            out[pick], ICON_INFO[pick] = icon_standing(img, icon_l, icon_r, yc)
             if cut:
                 clipped.add(pick)
     return out, unsure, clipped
@@ -312,6 +329,7 @@ class App(tk.Tk):
         self.thumb = None
         self.scan_thread = None
         self.check_thread = None   # background capture + OCR of the member list
+        self.list_vote = None      # a different member-list zone seen once; moved there if the next scan agrees
         self.auto_search = True    # keep searching, and start watching as soon as Local is found
         self.scan_result = None
         self.scan_for_watch = False
@@ -945,6 +963,7 @@ class App(tk.Tk):
         self.paused = False
         self.misses = 0
         self.tab_misses = 0
+        self.list_vote = None
         self.last_relocate = time.time()
         self.listbox.delete(0, "end")
         self.names_text.set("")
@@ -993,8 +1012,27 @@ class App(tk.Tk):
         if not self.lock.get():
             self.lock_account = best.get("account", "")
         old_sys, new_sys = self.current["system"], best["system"]
-        moved = any(abs(a - b) > 2 for a, b in zip(best["list"], self.current["list"]))
-        self.current = dict(best)
+        best = dict(best)
+        old_list = self.current["list"]
+        diff = lambda a, b: max(abs(p - q) for p, q in zip(a, b))                  # noqa: E731
+        same_place = math.hypot(best["tab"][0] - cx, best["tab"][1] - cy) <= 40
+        if same_place and not self.paused:
+            # the zone is re-detected from scratch each scan and wobbles a little (OCR / chat text): keep it
+            # still unless it really changed, and only move it when two scans in a row agree
+            if diff(best["list"], old_list) <= 12:
+                best["tab"], best["list"] = self.current["tab"], old_list
+                self.list_vote = None
+            elif self.list_vote and diff(best["list"], self.list_vote) <= 12:
+                self.list_vote = None
+            else:
+                self.list_vote = best["list"]
+                best["tab"], best["list"] = self.current["tab"], old_list
+        else:
+            self.list_vote = None
+        moved = best["list"] != old_list
+        if moved:
+            log(f"LIST ZONE {old_list} -> {best['list']}")
+        self.current = best
         if self.paused:
             self.paused = False
             self.tab_misses = 0
@@ -1145,7 +1183,7 @@ class App(tk.Tk):
                                f"Unsure rows: {len(unsure)}   (last check {time.strftime('%H:%M:%S')})")
             for n, st in new:
                 self.joined[n] = (time.strftime("%H:%M:%S"), st)
-                log(f"JOINED '{n}' standing={st} alert={st in ALERT_STANDINGS}")
+                log(f"JOINED '{n}' standing={st} alert={st in ALERT_STANDINGS} {ICON_INFO.get(n, '')}")
             self.refresh_list(seen)
             threats = [(n, st) for n, st in new if st in ALERT_STANDINGS]
             if threats:

@@ -1,9 +1,14 @@
 """Self-update from this project's GitHub repository.
 
-Flow: read latest.json (version, size, SHA-256) from the repo's main branch -> if that version is newer than
-VERSION, download the exe from the repo (checking size and SHA-256) to a temp folder -> start a tiny batch script
-that waits for this process to exit, swaps the exe in place and relaunches it. Only ever talks to
-raw.githubusercontent.com for the repository named in version.py, over HTTPS."""
+Flow: ask GitHub which commit main is at -> read latest.json (version, size, SHA-256) from that commit -> if that
+version is newer than VERSION, download the exe from the same commit (checking size and SHA-256) to a temp
+folder -> start a tiny batch script that waits for this process to exit, swaps the exe in place and relaunches
+it. Only ever talks to api.github.com / raw.githubusercontent.com for the repository named in version.py, over
+HTTPS.
+
+Why a commit and not just 'main': raw.githubusercontent.com caches each file for ~5 minutes on its own, so
+right after a release 'main' can serve the old latest.json with the new exe (no update seen) or the new
+latest.json with the old exe (checksum failure). Files at a fixed commit never change, so they always match."""
 import hashlib
 import json
 import os
@@ -17,8 +22,37 @@ import urllib.request
 from version import ASSET_NAME, REPO, VERSION
 
 # PACKY_UPDATE_BASE only exists so the updater can be tested against a local server.
-BASE = os.environ.get("PACKY_UPDATE_BASE") or f"https://raw.githubusercontent.com/{REPO}/main/"
+TEST_BASE = os.environ.get("PACKY_UPDATE_BASE")
+RAW = f"https://raw.githubusercontent.com/{REPO}/"
 HEADERS = {"User-Agent": "PackySackyIntelTool-updater"}
+
+
+def main_commit(timeout=8):
+    """The commit main is at: from the GitHub API, or (if its hourly limit is used up) from the ref list
+    git itself fetches when cloning. None if neither answers."""
+    sources = ((f"https://api.github.com/repos/{REPO}/commits/main", {"Accept": "application/vnd.github.sha"}),
+               (f"https://github.com/{REPO}.git/info/refs?service=git-upload-pack", {}))
+    for url, extra in sources:
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={**HEADERS, **extra}),
+                                        timeout=timeout) as resp:
+                text = resp.read(200_000).decode("ascii", "replace")
+            m = (re.search(r"([0-9a-f]{40}) refs/heads/main(?![\w/.-])", text)     # git: '<len><sha> <ref>'
+                 or re.fullmatch(r"\s*([0-9a-f]{40})\s*", text))
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return None
+
+
+def release_base(timeout=8):
+    """Base URL for this release's files: the commit main is at right now (its files never change, so they
+    can't be stale), else main itself (may lag a few minutes behind a release)."""
+    if TEST_BASE:
+        return TEST_BASE
+    sha = main_commit(timeout)
+    return f"{RAW}{sha}/" if sha else f"{RAW}main/"
 
 
 def parse_version(text):
@@ -33,18 +67,19 @@ def is_frozen():
 def check_latest(timeout=8):
     """Return {'version', 'url', 'size', 'sha256'} if a newer version is published, else None.
     Any network / permission problem (offline, private repo, ...) just raises and the caller carries on."""
-    req = urllib.request.Request(BASE + "latest.json", headers=HEADERS)
+    base = release_base(timeout)
+    req = urllib.request.Request(base + "latest.json", headers=HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         meta = json.load(resp)
     if parse_version(meta.get("version")) <= parse_version(VERSION):
         return None
-    return {"version": str(meta["version"]).lstrip("vV"), "url": BASE + urllib.parse.quote(ASSET_NAME),
+    return {"version": str(meta["version"]).lstrip("vV"), "url": base + urllib.parse.quote(ASSET_NAME),
             "size": int(meta.get("size") or 0), "sha256": (meta.get("sha256") or "").lower()}
 
 
 def download(info, progress=None, timeout=30):
     """Download the new exe to a temp folder and return its path. Raises on a size / hash mismatch."""
-    if not info["url"].startswith(BASE):
+    if not info["url"].startswith(TEST_BASE or RAW):
         raise ValueError("unexpected download location")
     if not info.get("sha256"):
         raise ValueError("latest.json has no checksum - refusing to install an unverified exe")

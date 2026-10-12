@@ -670,6 +670,7 @@ class App(tk.Tk):
             if st["manual"]:
                 self.status.set(f"Update check failed: {st['error']}")
         elif st["phase"] == "none":
+            log(f"UPDATE CHECK v{VERSION} is the latest")
             if st["manual"]:
                 self.status.set(f"You're on the latest version (v{VERSION}).")
         elif st["phase"] == "source":

@@ -28,6 +28,7 @@ import intel
 import locator
 import minimap
 import ocr
+import theme
 import universe
 import updater
 import wormholes
@@ -242,8 +243,10 @@ class App(tk.Tk):
         self.title(f"The Packy Sacky Intel Tool  v{VERSION}")
         self.resizable(True, True)
         self.geometry("1180x840")
+        self.minsize(900, 640)
+        theme.apply(self)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
         self.attributes("-topmost", True)
 
         self.windows = []          # Local windows found by the last scan
@@ -279,104 +282,134 @@ class App(tk.Tk):
         self.choice = tk.StringVar()
         self.lock = tk.BooleanVar(value=True)
 
-        f = ttk.Frame(self, padding=12)
-        f.grid(row=0, column=0, sticky="n")
-        f.columnconfigure(0, weight=1, uniform="top")
-        f.columnconfigure(1, weight=1, uniform="top")
+        # -- header: logo, name, status pill, gradient accent
+        hdr = ttk.Frame(self, style="Header.TFrame", padding=(16, 12, 16, 10))
+        hdr.grid(row=0, column=0, columnspan=2, sticky="ew")
+        hdr.columnconfigure(1, weight=1)
+        ttk.Label(hdr, image=theme.logo(round(44 * self.winfo_fpixels("1i") / 96))).grid(
+            row=0, column=0, rowspan=2, padx=(0, 12))
+        ttk.Label(hdr, text="The Packy Sacky Intel Tool", style="Brand.TLabel").grid(row=0, column=1, sticky="sw")
+        ttk.Label(hdr, text=f"COTTON CANDY GENOCIDE  ·  INTEL SERVICES  ·  v{VERSION}", style="Tagline.TLabel").grid(
+            row=1, column=1, sticky="nw")
+        self.update_btn = ttk.Button(hdr, text="Check for updates", command=self.check_updates,
+                                     style="Header.TButton")
+        self.update_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(0, 12))
+        self.pill = theme.Pill(hdr)
+        self.pill.grid(row=0, column=3, rowspan=2, sticky="e")
+        self.set_state("IDLE", "idle")
+        theme.GradientBar(self, height=2).grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        # -- top buttons
-        ttk.Button(f, text="Find Local windows", command=lambda: self.find_windows(True)).grid(
-            row=0, column=0, sticky="ew", padx=(0, 4))
-        self.toggle = ttk.Button(f, text="Start", command=self.toggle_watch, state="disabled")
-        self.toggle.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        f = ttk.Frame(self, padding=(12, 12, 6, 12))
+        f.grid(row=2, column=0, sticky="nsew")
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(3, weight=1)
 
-        # -- which window
-        wf = ttk.LabelFrame(f, text="Local window", padding=8)
-        wf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        wf.columnconfigure(0, weight=1)
-        self.combo = ttk.Combobox(wf, textvariable=self.choice, state="readonly", width=46)
-        self.combo.grid(row=0, column=0, sticky="ew")
+        # -- which window + start / stop
+        wc, wf = theme.card(f, "Local window")
+        wc.grid(row=0, column=0, sticky="ew")
+        wf.columnconfigure(0, weight=1, uniform="btn")
+        wf.columnconfigure(1, weight=1, uniform="btn")
+        self.combo = ttk.Combobox(wf, textvariable=self.choice, state="readonly", width=40)
+        self.combo.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.select(self.combo.current()))
         ttk.Checkbutton(wf, text="Lock to this account's window (pause if it disappears)",
-                        variable=self.lock).grid(row=1, column=0, sticky="w", pady=(6, 0))
+                        variable=self.lock, style="Card.TCheckbutton").grid(row=1, column=0, columnspan=2,
+                                                                            sticky="w", pady=(8, 0))
+        ttk.Button(wf, text="Find Local windows", command=lambda: self.find_windows(True)).grid(
+            row=2, column=0, sticky="ew", padx=(0, 4), pady=(12, 0))
+        self.toggle = ttk.Button(wf, text="Start watching", command=self.toggle_watch, state="disabled",
+                                 style="Primary.TButton")
+        self.toggle.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
+
+        # -- status + live preview
+        sc, sf = theme.card(f, "Status")
+        sc.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        sf.columnconfigure(0, weight=1)
+        ttk.Label(sf, textvariable=self.status, wraplength=360, justify="left", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w")
+        self.names_label = ttk.Label(sf, textvariable=self.names_text, wraplength=360, justify="left",
+                                     style="Card.Alert.TLabel")
+        self.names_label.grid(row=1, column=0, sticky="w")
+        pf = tk.Frame(sf, width=360, height=96, bg=theme.WELL, highlightthickness=1,
+                      highlightbackground=theme.BORDER)
+        pf.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        pf.pack_propagate(False)
+        self.preview = tk.Label(pf, text="live preview of the member list", bg=theme.WELL, fg=theme.DIM,
+                                font=(theme.FONT, 9))
+        self.preview.pack(expand=True)
+        ttk.Label(sf, textvariable=self.diff_text, style="Card.Muted.TLabel").grid(row=3, column=0, sticky="w",
+                                                                                   pady=(6, 0))
 
         # -- alert settings
-        af = ttk.LabelFrame(f, text="Alerts (neutral / hostile only)", padding=8)
-        af.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ac, af = theme.card(f, "Alerts", "neutral / hostile only")
+        ac.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         af.columnconfigure(1, weight=1)
-        checks = ttk.Frame(af)
+        checks = ttk.Frame(af, style="CardBody.TFrame")
         checks.grid(row=0, column=0, columnspan=3, sticky="w")
         for text, var in (("Voice", self.voice), ("Siren", self.beep), ("Popup", self.popup)):
-            ttk.Checkbutton(checks, text=text, variable=var).pack(side="left", padx=(0, 14))
-        ttk.Label(af, text="Message").grid(row=1, column=0, sticky="w", pady=(8, 0))
+            ttk.Checkbutton(checks, text=text, variable=var, style="Card.TCheckbutton").pack(side="left",
+                                                                                            padx=(0, 18))
+        ttk.Label(af, text="Message", style="Card.Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(af, textvariable=self.message).grid(row=1, column=1, columnspan=2, sticky="ew",
-                                                      padx=(8, 0), pady=(8, 0))
-        ttk.Label(af, text="Volume").grid(row=2, column=0, sticky="w", pady=(8, 0))
+                                                      padx=(10, 0), pady=(10, 0))
+        ttk.Label(af, text="Volume", style="Card.Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
         ttk.Scale(af, from_=0, to=100, variable=self.volume, orient="horizontal",
                   command=lambda v: self.volume.set(int(float(v)))).grid(row=2, column=1, sticky="ew",
-                                                                         padx=8, pady=(8, 0))
+                                                                         padx=10, pady=(10, 0))
         ttk.Button(af, text="Test voice", command=lambda: self.speak(self.message.get())).grid(
-            row=2, column=2, sticky="e", pady=(8, 0))
-        ttk.Label(af, text="Check every (sec)").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Spinbox(af, from_=0.2, to=60, increment=0.5, width=6, textvariable=self.interval).grid(
-            row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-
-        # -- status
-        ttk.Label(f, textvariable=self.status, wraplength=360, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
-        ttk.Label(f, textvariable=self.diff_text).grid(row=4, column=0, columnspan=2, sticky="w")
-        ttk.Label(f, textvariable=self.names_text, wraplength=360, justify="left").grid(
-            row=5, column=0, columnspan=2, sticky="w")
-
-        # -- live preview (fixed-size box so the window doesn't resize as the picture changes)
-        pf = tk.Frame(f, width=360, height=96, bg="#222")
-        pf.grid(row=6, column=0, columnspan=2, pady=(8, 0))
-        pf.pack_propagate(False)
-        self.preview = tk.Label(pf, text="(live preview of the member list)", bg="#222", fg="#aaa")
-        self.preview.pack(expand=True)
+            row=2, column=2, sticky="e", pady=(10, 0))
+        ttk.Label(af, text="Check every", style="Card.Muted.TLabel").grid(row=3, column=0, sticky="w",
+                                                                          pady=(10, 0))
+        every = ttk.Frame(af, style="CardBody.TFrame")
+        every.grid(row=3, column=1, columnspan=2, sticky="w", padx=(10, 0), pady=(10, 0))
+        ttk.Spinbox(every, from_=0.2, to=60, increment=0.5, width=6, textvariable=self.interval).pack(side="left")
+        ttk.Label(every, text="seconds", style="Card.Muted.TLabel").pack(side="left", padx=(8, 0))
 
         # -- session list
-        ttk.Label(f, text="Local list (this session)").grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 2))
-        lf = ttk.Frame(f)
-        lf.grid(row=8, column=0, columnspan=2, sticky="ew")
+        lc, lf = theme.card(f, "Local", "this session")
+        lc.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         lf.columnconfigure(0, weight=1)
-        self.listbox = tk.Listbox(lf, height=8, width=50, activestyle="none")
+        lf.rowconfigure(0, weight=1)
+        self.listbox = tk.Listbox(lf, height=6, width=50, activestyle="none")
+        theme.style_text(self.listbox)
         sb = ttk.Scrollbar(lf, orient="vertical", command=self.listbox.yview)
         self.listbox.config(yscrollcommand=sb.set)
-        self.listbox.grid(row=0, column=0, sticky="ew")
-        sb.grid(row=0, column=1, sticky="ns")
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns", padx=(4, 0))
 
         # -- intel feed (right-hand side): tails EVE's own chat log files for channels named *intel*
         self.intel = intel.IntelFeed()
         self.intel_status = tk.StringVar(value="Looking for intel chat logs…")
         self.intel_scroll = tk.BooleanVar(value=True)
         rc = ttk.PanedWindow(self, orient="vertical")      # drag the divider to resize map vs feed
-        rc.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
+        rc.grid(row=2, column=1, sticky="nsew", padx=(6, 12), pady=12)
         self.build_map(rc)
-        inf = ttk.LabelFrame(rc, text="Intel feed (times are EVE time)", padding=8)
-        rc.add(inf, weight=1)
+        ic, inf = theme.card(rc, "Intel feed", "times are EVE time")
+        rc.add(ic, weight=1)
         inf.rowconfigure(1, weight=1)
         inf.columnconfigure(0, weight=1)
-        ttk.Label(inf, textvariable=self.intel_status, wraplength=480).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.intel_text = tk.Text(inf, width=62, height=9, wrap="word", state="disabled", bg="#111", fg="#ddd",
-                                  font=("Consolas", 10), relief="flat", padx=6, pady=4)
+        ttk.Label(inf, textvariable=self.intel_status, wraplength=560, style="Card.Muted.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.intel_text = tk.Text(inf, width=62, height=9, wrap="word", state="disabled")
+        theme.style_text(self.intel_text, mono=True)
         isb = ttk.Scrollbar(inf, orient="vertical", command=self.intel_text.yview)
         self.intel_text.config(yscrollcommand=isb.set)
         self.intel_text.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        isb.grid(row=1, column=1, sticky="ns", pady=(6, 0))
-        ctl = ttk.Frame(inf)
-        ctl.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        ttk.Checkbutton(ctl, text="Auto-scroll", variable=self.intel_scroll).pack(side="left")
+        isb.grid(row=1, column=1, sticky="ns", padx=(4, 0), pady=(6, 0))
+        ctl = ttk.Frame(inf, style="CardBody.TFrame")
+        ctl.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(ctl, text="Auto-scroll", variable=self.intel_scroll, style="Card.TCheckbutton").pack(
+            side="left")
         ttk.Button(ctl, text="Clear", command=self.intel_clear).pack(side="right")
         t = self.intel_text
-        t.tag_config("time", foreground="#777")
-        t.tag_config("chan", foreground="#c9a227")
-        t.tag_config("sender", foreground="#6cf", font=("Consolas", 10, "bold"))
-        t.tag_config("hist", foreground="#8a8a8a")
-        t.tag_config("hit", background="#5a1a1a", foreground="#fff")
-        t.tag_config("note", foreground="#7a7", font=("Consolas", 9, "italic"))
-        t.tag_config("lsys", foreground="#4ec9b0", underline=True)         # system -> zKillboard
-        t.tag_config("lplr", foreground="#6cf", underline=True)            # pilot  -> zKillboard
+        t.tag_config("time", foreground=theme.DIM)
+        t.tag_config("chan", foreground=theme.WARN)
+        t.tag_config("hist", foreground=theme.MUTED)
+        t.tag_config("hit", background=theme.DANGER_BG, foreground="#FFFFFF")
+        t.tag_config("note", foreground=theme.GOOD, font=(theme.MONO, 9, "italic"))
+        t.tag_config("lsys", foreground=theme.CYAN, underline=True)        # system -> zKillboard
+        t.tag_config("lplr", foreground=theme.FLOSS, underline=True)       # pilot  -> zKillboard
+        t.tag_config("sender", foreground=theme.PRIMARY, font=(theme.MONO, 10, "bold"))
         t.tag_bind("link", "<Enter>", lambda e: t.config(cursor="hand2"))
         t.tag_bind("link", "<Leave>", lambda e: t.config(cursor=""))
         t.tag_bind("link", "<Button-1>", self.open_link)
@@ -412,11 +445,31 @@ class App(tk.Tk):
         except Exception as ex:
             log(f"PLACEMENT ERROR {ex!r}")
 
+    def set_state(self, text, kind):
+        """Header status pill: idle / search / watch / paused / alert."""
+        self.pill.set(text, kind)
+        self.state_kind = kind
+
+    def set_names(self, text, style="Card.Alert.TLabel"):
+        self.names_label.configure(style=style)
+        self.names_text.set(text)
+
     # ---- auto update -----------------------------------------------------------------------
-    def start_update(self):
-        """Background: look for a newer GitHub release; if there is one, download it and restart into it."""
-        self.update_state = {"phase": "check", "progress": "", "error": None, "path": None, "info": None}
+    def check_updates(self):
+        """'Check for updates' button: same as the launch check, but says what it found."""
+        if self.update_state and self.update_state["phase"] in ("check", "download", "ready"):
+            return
+        self.start_update(manual=True)
+
+    def start_update(self, manual=False):
+        """Background: look for a newer GitHub release; if there is one, download it and restart into it.
+        When running from source it only reports a newer version (there is no exe to swap)."""
+        self.update_state = {"phase": "check", "progress": "", "error": None, "path": None, "info": None,
+                             "manual": manual}
         st = self.update_state
+        if manual:
+            self.update_btn.config(text="Checking…", state="disabled")
+        frozen = updater.is_frozen()
 
         def work():
             try:
@@ -425,6 +478,9 @@ class App(tk.Tk):
                     st["phase"] = "none"
                     return
                 st["info"] = info
+                if not frozen:
+                    st["phase"] = "source"
+                    return
                 st["phase"] = "download"
                 st["path"] = updater.download(
                     info, lambda d, t: st.__setitem__("progress", f"{d * 100 // t}%"))
@@ -441,8 +497,19 @@ class App(tk.Tk):
             if st["phase"] == "download":
                 self.status.set(f"Downloading update v{st['info']['version']}… {st['progress']}")
             self.after(300, self.poll_update)
-        elif st["phase"] == "error":
+            return
+        if st["phase"] != "ready":
+            self.update_btn.config(text="Check for updates", state="normal")
+        if st["phase"] == "error":
             log(f"UPDATE CHECK FAILED {st['error']}")
+            if st["manual"]:
+                self.status.set(f"Update check failed: {st['error']}")
+        elif st["phase"] == "none":
+            if st["manual"]:
+                self.status.set(f"You're on the latest version (v{VERSION}).")
+        elif st["phase"] == "source":
+            self.status.set(f"v{st['info']['version']} is available (running from source - pull the repo "
+                            f"or use the exe to update).")
         elif st["phase"] == "ready":
             log(f"UPDATING v{VERSION} -> v{st['info']['version']}")
             self.status.set(f"Installing v{st['info']['version']} and restarting…")
@@ -452,6 +519,7 @@ class App(tk.Tk):
             except Exception as ex:
                 log(f"UPDATE APPLY FAILED {ex!r}")
                 self.status.set(f"Update downloaded but could not be installed: {ex}")
+                self.update_btn.config(text="Check for updates", state="normal")
                 return
             self.after(200, self.destroy)
 
@@ -488,6 +556,7 @@ class App(tk.Tk):
         if self.running or not self.auto_search:
             return
         self.status.set("Searching all screens for Local chat windows…")
+        self.set_state("SEARCHING", "search")
         self.start_scan(False)
 
     @staticmethod
@@ -497,6 +566,7 @@ class App(tk.Tk):
     def found(self, res):
         if isinstance(res, Exception):
             self.status.set(f"Search error: {res}")
+            self.set_state("ERROR", "alert")
             return
         self.windows = res
         self.combo["values"] = [self.label(w, i) for i, w in enumerate(res, 1)]
@@ -506,6 +576,7 @@ class App(tk.Tk):
             self.toggle.config(state="disabled")
             self.hide_outline()
             self.status.set("Searching for Local chat… make sure the Local tab and its member list are visible.")
+            self.set_state("SEARCHING", "search")
             self.after(3000, self.find_windows)           # keep looking until it shows up
             return
         self.combo.current(0)
@@ -525,7 +596,7 @@ class App(tk.Tk):
         if self.running:                                  # switched window while watching: start over on it
             self.start()
             return
-        self.show_outline("yellow")
+        self.show_outline(theme.WARN)
         self.show_preview(self.grab())
 
     # ---- mini map ----------------------------------------------------------------------------
@@ -540,8 +611,8 @@ class App(tk.Tk):
         self.maps = []
         self.wormholes = []        # active Thera / Turnur connections (EVE-Scout)
         self.after(2000, self.refresh_wormholes)
-        mf = ttk.LabelFrame(parent, text="Mini map", padding=6)
-        parent.add(mf, weight=3)
+        mc, mf = theme.card(parent, "Mini map")
+        parent.add(mc, weight=3)
         mf.columnconfigure(0, weight=1)
         mf.rowconfigure(0, weight=1)
         view = minimap.MapView(mf, self)
@@ -551,10 +622,30 @@ class App(tk.Tk):
     def pop_out_map(self):
         """Open the map in its own window (resize / move it anywhere, e.g. on another monitor)."""
         win = tk.Toplevel(self)
-        win.title("The Packy Sacky Intel Tool - map")
+        theme.window(win, "The Packy Sacky Intel Tool - map")
         win.geometry("760x640")
-        view = minimap.MapView(win, self, popout=True)
-        view.pack(fill="both", expand=True, padx=8, pady=8)
+        try:                                              # fill the screen that covers the least of the game / app
+            app = (self.winfo_rootx(), self.winfo_rooty(),
+                   self.winfo_rootx() + self.winfo_width(), self.winfo_rooty() + self.winfo_height())
+            clients = [r for _, r in eve_clients()]
+
+            def covered(m, rects):
+                mx, my, mw, mh = m
+                return sum(max(0, min(mx + mw, r[2]) - max(mx, r[0])) * max(0, min(my + mh, r[3]) - max(my, r[1]))
+                           for r in rects)
+
+            mx, my, mw, mh = min(monitors(), key=lambda m: (covered(m, clients), covered(m, [app])))
+            win.geometry(f"{max(400, mw - 80)}x{max(300, mh - 120)}{mx + 40:+d}{my + 40:+d}")
+            win.after(50, lambda: win.state("zoomed"))
+        except Exception as ex:
+            log(f"MAP PLACEMENT ERROR {ex!r}")
+        theme.GradientBar(win, height=2).pack(fill="x")
+        box, body = theme.card(win, "Mini map")
+        box.pack(fill="both", expand=True, padx=12, pady=12)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        view = minimap.MapView(body, self, popout=True)
+        view.grid(row=0, column=0, sticky="nsew")
         view.view.set(self.maps[0].view.get())
         view.jumps.set(self.maps[0].jumps.get())
         self.maps.append(view)
@@ -797,10 +888,11 @@ class App(tk.Tk):
         self.listbox.delete(0, "end")
         self.names_text.set("")
         self.running = True
-        self.toggle.config(text="Stop")
+        self.toggle.config(text="Stop watching", style="Danger.TButton")
         who = self.current.get("account")
         self.status.set(f"WATCHING {who + ' - ' if who else ''}green box = member list. Alerts: neutral / hostile only.")
-        self.show_outline("lime")
+        self.set_state("WATCHING", "watch")
+        self.show_outline(theme.GOOD)
         self.tick()
 
     def stop(self):
@@ -809,11 +901,12 @@ class App(tk.Tk):
         if self.job:
             self.after_cancel(self.job)
             self.job = None
-        self.toggle.config(text="Start")
+        self.toggle.config(text="Start watching", style="Primary.TButton")
         self.paused = False
         if self.current:
             self.status.set("Stopped")
-            self.show_outline("yellow")
+            self.show_outline(theme.WARN)
+        self.set_state("STOPPED", "idle")
 
     def relocated(self, res):
         """Called after a background re-search while watching: follow the locked window if it moved,
@@ -848,17 +941,19 @@ class App(tk.Tk):
             log(f"RESUMED {self.lock_account or 'window'}")
             moved = True
         if moved:
-            self.show_outline("lime")
+            self.show_outline(theme.GOOD)
         if old_sys and new_sys and old_sys != new_sys:
             log(f"SYSTEM CHANGE {old_sys} -> {new_sys}: re-baselining")
             self.known = None
             self.joined = {}
             self.pending = {}
             self.listbox.delete(0, "end")
-            self.names_text.set(f"Entered {new_sys} - learning who is here…")
+            self.set_names(f"Entered {new_sys} - learning who is here…", "Card.Muted.TLabel")
             self.grace_until = time.time() + GRACE_AFTER_JUMP
         who = self.current.get("account")
         self.status.set(f"WATCHING {who + ' in ' if who else ''}{new_sys or 'Local'}. Alerts: neutral / hostile only.")
+        if self.state_kind != "alert":
+            self.set_state("WATCHING", "watch")
 
     def pause(self):
         self.paused = True
@@ -874,6 +969,7 @@ class App(tk.Tk):
         else:
             self.status.set(f"PAUSED - {who} window not found. Will resume automatically when it reappears.")
         log(f"PAUSED: {self.lock_account or 'window'} disappeared")
+        self.set_state("PAUSED", "paused")
 
     def tab_visible(self):
         """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved)."""
@@ -939,13 +1035,15 @@ class App(tk.Tk):
                     self.misses = 1                           # next failed search pauses
                     self.hide_outline()
                     self.status.set("Local tab not visible - searching…")
+                    self.set_state("SEARCHING", "search")
                     self.last_relocate = now
                     self.job = self.after(1000, self.tick)
                     return
             else:
                 if self.tab_misses >= 3:
-                    self.show_outline("lime")
+                    self.show_outline(theme.GOOD)
                     self.status.set("WATCHING")
+                    self.set_state("WATCHING", "watch")
                 self.tab_misses = 0
             img = self.grab()
             self.show_preview(img)
@@ -959,11 +1057,12 @@ class App(tk.Tk):
             self.refresh_list(seen)
             threats = [(n, st) for n, st in new if st in ALERT_STANDINGS]
             if threats:
-                self.names_text.set("ALERT: " + ", ".join(f"{n} ({STANDING_LABEL[s]})" for n, s in threats)
+                self.set_names("ALERT: " + ", ".join(f"{n} ({STANDING_LABEL[s]})" for n, s in threats)
                                     + f"  at {time.strftime('%H:%M:%S')}")
                 self.alert(threats)
             elif new:
-                self.names_text.set("Friendly entered: " + ", ".join(f"{n} ({STANDING_LABEL[s]})" for n, s in new))
+                self.set_names("Friendly entered: " + ", ".join(f"{n} ({STANDING_LABEL[s]})" for n, s in new),
+                               "Card.Good.TLabel")
         except Exception as ex:
             self.status.set(f"Error: {ex}")
             log(f"ERROR {ex!r}")
@@ -976,12 +1075,12 @@ class App(tk.Tk):
         lb.delete(0, "end")
         for n, (t, st) in reversed(list(self.joined.items())):
             lb.insert("end", f"NEW {t}  {n}  [{STANDING_LABEL[st]}]")
-            lb.itemconfig("end", fg="red" if st in ALERT_STANDINGS else "#2a7")
+            lb.itemconfig("end", fg=theme.DANGER_TEXT if st in ALERT_STANDINGS else theme.GOOD)
         for n in sorted(set(self.known or {}) - set(self.joined), key=str.lower):
             st = self.known[n]
             lb.insert("end", f"{n}  [{STANDING_LABEL[st]}]" + ("" if n in seen else "   (not visible)"))
             if n not in seen:
-                lb.itemconfig("end", fg="gray")
+                lb.itemconfig("end", fg=theme.DIM)
         lb.yview_moveto(top)
 
     # ---- alerting --------------------------------------------------------------------------
@@ -1004,8 +1103,11 @@ class App(tk.Tk):
             self.status.set(f"Voice error: {ex}")
 
     def alert(self, threats):
-        self.show_outline("red")
-        self.after(1500, lambda: self.running and self.show_outline("lime"))
+        self.show_outline(theme.DANGER)
+        self.set_state("HOSTILE IN LOCAL", "alert")
+        self.after(8000, lambda: self.state_kind == "alert" and self.running and not self.paused
+                   and self.set_state("WATCHING", "watch"))
+        self.after(1500, lambda: self.running and self.show_outline(theme.GOOD))
         if self.voice.get():
             self.speak(" . ".join([self.message.get()] * 3))
         if self.beep.get():
@@ -1014,11 +1116,18 @@ class App(tk.Tk):
             self.deiconify()
             self.lift()
             top = tk.Toplevel(self)
-            top.title("Hostile in local")
+            theme.window(top, "Hostile in local")
             top.attributes("-topmost", True)
             who = ", ".join(f"{n} ({STANDING_LABEL[s]})" for n, s in threats)
-            ttk.Label(top, text=f"{self.message.get()}\n{who}", padding=20).pack()
-            ttk.Button(top, text="OK", command=top.destroy).pack(pady=(0, 12))
+            theme.GradientBar(top, height=2).pack(fill="x")
+            box, body = theme.card(top, padding=18)
+            box.pack(fill="both", expand=True, padx=14, pady=14)
+            ttk.Label(body, text="HOSTILE IN LOCAL", style="Card.Alert.TLabel",
+                      font=(theme.DISPLAY, 14)).pack(anchor="w")
+            ttk.Label(body, text=self.message.get(), style="Card.Strong.TLabel").pack(anchor="w", pady=(6, 0))
+            ttk.Label(body, text=who, style="Card.TLabel", wraplength=380, justify="left").pack(anchor="w",
+                                                                                              pady=(2, 14))
+            ttk.Button(body, text="Got it", command=top.destroy, style="Danger.TButton").pack(anchor="e")
 
 
 if __name__ == "__main__":

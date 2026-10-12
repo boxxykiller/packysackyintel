@@ -28,7 +28,7 @@ python screenwatch.py
 ```
 pip install pyinstaller
 pyinstaller --onefile --windowed --name "The Packy Sacky Intel Tool" --collect-submodules winrt ^
-    --add-data "data;data" screenwatch.py
+    --add-data "data;data" --add-data "assets;assets" --icon assets/logo.ico screenwatch.py
 ```
 
 ## Map data

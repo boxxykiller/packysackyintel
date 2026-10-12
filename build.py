@@ -14,6 +14,8 @@ here = os.path.dirname(os.path.abspath(__file__))
 os.chdir(here)
 subprocess.check_call([sys.executable, "-m", "PyInstaller", "--onefile", "--windowed", "--name", ASSET_NAME[:-4],
                        "--collect-submodules", "winrt", "--add-data", os.path.join(here, "data") + ";data",
+                       "--add-data", os.path.join(here, "assets") + ";assets",
+                       "--icon", os.path.join(here, "assets", "logo.ico"),
                        "--distpath", here, "--workpath", os.path.join(here, "build"),
                        "--specpath", os.path.join(here, "build"), "screenwatch.py"])
 exe = os.path.join(here, ASSET_NAME)

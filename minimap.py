@@ -2,15 +2,19 @@
 import tkinter as tk
 from tkinter import ttk
 
+import theme
+
 VIEW_NEARBY = "Nearby systems"
 VIEW_REGION = "Whole region"
-BG = "#0b0e14"
-HUB_COLORS = {"Thera": "#b07cff", "Turnur": "#35c9d8"}
+BG = theme.WELL
+HUB_COLORS = {"Thera": theme.VIOLET, "Turnur": theme.CYAN}
+SEC_COLORS = ("#4ADE80", "#F59E0B", "#F43F5E")          # high / low / null sec
+GATE = "#1C2B44"
 
 
 class MapView(ttk.Frame):
     def __init__(self, parent, app, popout=False):
-        super().__init__(parent)
+        super().__init__(parent, style="CardBody.TFrame")
         self.app = app
         self.popout = popout
         self.view = tk.StringVar(value=VIEW_NEARBY)
@@ -27,25 +31,30 @@ class MapView(ttk.Frame):
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
-        bar = ttk.Frame(self)
+        bar = ttk.Frame(self, style="CardBody.TFrame")
         bar.grid(row=0, column=0, sticky="ew")
         cb = ttk.Combobox(bar, textvariable=self.view, values=[VIEW_NEARBY, VIEW_REGION], state="readonly", width=15)
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda e: self.refit())
-        ttk.Label(bar, text="Jumps").pack(side="left", padx=(8, 2))
+        ttk.Label(bar, text="Jumps", style="Card.Muted.TLabel").pack(side="left", padx=(12, 4))
         ttk.Spinbox(bar, from_=1, to=30, width=3, textvariable=self.jumps, command=self.refit).pack(side="left")
-        ttk.Label(bar, text="Text").pack(side="left", padx=(8, 2))
+        ttk.Label(bar, text="Text", style="Card.Muted.TLabel").pack(side="left", padx=(12, 4))
         ttk.Spinbox(bar, from_=7, to=22, width=3, textvariable=self.fontsize, command=self.draw).pack(side="left")
-        ttk.Checkbutton(bar, text="Names", variable=self.names, command=self.draw).pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(bar, text="Wormholes", variable=self.show_wh, command=self.draw).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Fit", width=4, command=self.refit).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(bar, text="Names", variable=self.names, command=self.draw,
+                        style="Card.TCheckbutton").pack(side="left", padx=(14, 0))
+        ttk.Checkbutton(bar, text="Wormholes", variable=self.show_wh, command=self.draw,
+                        style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
+        ttk.Button(bar, text="Fit", width=4, command=self.refit).pack(side="left", padx=(12, 0))
         if not popout:
             ttk.Button(bar, text="Pop out", command=app.pop_out_map).pack(side="right")
-        ttk.Label(self, textvariable=self.info, wraplength=600).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, width=560, height=340)
-        self.canvas.grid(row=2, column=0, sticky="nsew", pady=(4, 4))
-        ttk.Label(self, textvariable=self.hover, foreground="gray").grid(row=3, column=0, sticky="w")
-        ttk.Label(self, textvariable=self.report, wraplength=600, justify="left").grid(row=4, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.info, wraplength=600, style="Card.TLabel").grid(row=1, column=0, sticky="w",
+                                                                                         pady=(8, 0))
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=1, highlightbackground=theme.BORDER,
+                                highlightcolor=theme.BORDER, width=560, height=340)
+        self.canvas.grid(row=2, column=0, sticky="nsew", pady=(6, 6))
+        ttk.Label(self, textvariable=self.hover, style="Card.Muted.TLabel").grid(row=3, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.report, wraplength=600, justify="left", style="Card.TLabel").grid(
+            row=4, column=0, sticky="w")
 
         c = self.canvas
         c.bind("<Configure>", lambda e: self.draw())
@@ -120,10 +129,11 @@ class MapView(ttk.Frame):
         if W < 40 or H < 40:
             return
         if not u:
-            c.create_text(W / 2, H / 2, text="Map data missing", fill="#888")
+            c.create_text(W / 2, H / 2, text="Map data missing", fill=theme.MUTED, font=(theme.FONT, 10))
             return
         if cur is None:
-            c.create_text(W / 2, H / 2, text="Waiting for your current system…", fill="#888")
+            c.create_text(W / 2, H / 2, text="Waiting for your current system…", fill=theme.MUTED,
+                          font=(theme.FONT, 10))
             return
         dist = u.distances(cur)
         region = u.sys[cur]["region"]
@@ -141,17 +151,14 @@ class MapView(ttk.Frame):
             reach = max((span(s) for s in home), default=0) * 1.1
             ids = [s for s in near if u.sys[s]["region"] == region or span(s) <= reach]
             pad = 46
-            xs = [u.sys[s]["x"] for s in ids]
-            ys = [u.sys[s]["y"] for s in ids]
-            cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2     # centre the group, use all the space
-            k0 = min((W - 2 * pad) / ((max(xs) - min(xs)) or 1), (H - 2 * pad) / ((max(ys) - min(ys)) or 1))
         else:
             ids = [s for s in u.by_region[region] if u.sys[s]["x"] is not None]
-            xs = [u.sys[s]["x"] for s in ids]
-            ys = [u.sys[s]["y"] for s in ids]
-            cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
             pad = 40
-            k0 = min((W - 2 * pad) / ((max(xs) - min(xs)) or 1), (H - 2 * pad) / ((max(ys) - min(ys)) or 1))
+        # centre on the current system and zoom so everything in the view still fits around it
+        cx, cy = u.sys[cur]["x"], u.sys[cur]["y"]
+        dx = max((abs(u.sys[s]["x"] - cx) for s in ids), default=0) or 1
+        dy = max((abs(u.sys[s]["y"] - cy) for s in ids), default=0) or 1
+        k0 = min((W / 2 - pad) / dx, (H / 2 - pad) / dy)
         k = k0 * self.zoom
 
         def pos(s):
@@ -164,7 +171,7 @@ class MapView(ttk.Frame):
         for a in ids:                                                  # gates
             for b in u.adj.get(a, ()):
                 if b in idset and a < b:
-                    c.create_line(*pos(a), *pos(b), fill="#2f3b52", width=1)
+                    c.create_line(*pos(a), *pos(b), fill=GATE, width=1)
         fs = self.fontsize.get()
         small = ("Segoe UI", max(6, fs - 2))
         bold = ("Segoe UI", fs, "bold")
@@ -172,7 +179,7 @@ class MapView(ttk.Frame):
         show_names = self.names.get() and (self.zoom >= 1.0 or len(ids) <= 80)
         for s in ids:                                                  # systems, coloured by security
             sec = u.sys[s]["sec"]
-            col = "#3fb27f" if sec >= 0.45 else "#e0a030" if sec > 0 else "#d45a5a"
+            col = SEC_COLORS[0] if sec >= 0.45 else SEC_COLORS[1] if sec > 0 else SEC_COLORS[2]
             x, y = pos(s)
             if not (-20 < x < W + 20 and -20 < y < H + 20):
                 continue
@@ -182,7 +189,7 @@ class MapView(ttk.Frame):
             else:                                                      # other region: hollow dot
                 c.create_oval(x - radius, y - radius, x + radius, y + radius, outline=col, width=1)
             if show_names and s != cur and s not in reported:
-                c.create_text(x + radius + 3, y, text=u.sys[s]["name"], fill="#7f8aa3", anchor="w", font=small,
+                c.create_text(x + radius + 3, y, text=u.sys[s]["name"], fill=theme.MUTED, anchor="w", font=small,
                               tags="sysname")
 
         placed = []
@@ -196,32 +203,34 @@ class MapView(ttk.Frame):
                 clash = any(not (r < pl or l > pr or b < pt or tp > pb) for pl, pt, pr, pb in placed)
                 if not clash or (dx, dy) == (11, 26):
                     placed.append((l - 2, tp - 1, r + 2, b + 1))
-                    c.create_rectangle(l - 2, tp - 1, r + 2, b + 1, fill=BG, outline="", tags="chip")
+                    c.create_rectangle(l - 4, tp - 1, r + 4, b + 1, fill=theme.SURFACE, outline=theme.BORDER,
+                                       tags="chip")
                     return
                 c.delete(t)
 
         cxp, cyp = pos(cur)
-        put_label(cxp, cyp, u.sys[cur]["name"], "#ffffff")
+        put_label(cxp, cyp, u.sys[cur]["name"], "#FFFFFF")
         off_map = []
         for sid, r in live:
             d = dist.get(sid)
             label = f"{u.sys[sid]['name']} ({'here' if d == 0 else str(d) + 'j' if d is not None else '?'})"
             if sid in idset and sid != cur:
                 x, y = pos(sid)
-                c.create_oval(x - 8, y - 8, x + 8, y + 8, outline="#ff4d4d", width=2)
-                put_label(x, y, label, "#ff8080")
+                c.create_oval(x - 8, y - 8, x + 8, y + 8, outline=theme.DANGER, width=2)
+                put_label(x, y, label, theme.DANGER_TEXT)
             elif sid != cur:
                 off_map.append(label)
         wh_here = [w for w in app.wormholes if w["sid"] in idset] if self.show_wh.get() else []
         for w in wh_here:
             x, y = pos(w["sid"])
-            col = HUB_COLORS.get(w["hub"], "#b07cff")
+            col = HUB_COLORS.get(w["hub"], theme.VIOLET)
             c.create_polygon(x, y - 9, x + 9, y, x, y + 9, x - 9, y, outline=col, fill="", width=2)
             put_label(x, y, f"{w['hub']} {w['hours']}h", col)
         c.tag_raise("chip")
         c.tag_raise("lbl")
-        c.create_oval(cxp - 10, cyp - 10, cxp + 10, cyp + 10, outline="#ffffff", width=2)
-        c.create_oval(cxp - 4, cyp - 4, cxp + 4, cyp + 4, fill="#7dff9b", outline="")
+        c.create_oval(cxp - 14, cyp - 14, cxp + 14, cyp + 14, outline=theme.mix(BG, theme.PRIMARY, .35), width=2)
+        c.create_oval(cxp - 9, cyp - 9, cxp + 9, cyp + 9, outline="#FFFFFF", width=2)
+        c.create_oval(cxp - 4, cyp - 4, cxp + 4, cyp + 4, fill=theme.PRIMARY, outline="")
 
         sec_cur = u.sys[cur]["sec"]
         self.info.set(f"You: {u.sys[cur]['name']}  -  {u.regions.get(region, '?')}  (security {sec_cur:.1f})   "

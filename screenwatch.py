@@ -15,7 +15,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from PIL import Image, ImageChops, ImageFilter, ImageGrab, ImageOps, ImageTk
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageTk
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -62,6 +62,61 @@ def monitors():
 
     ctypes.windll.user32.EnumDisplayMonitors(None, None, proc(cb), 0)
     return out or [virtual_screen()]
+
+
+def _init_gdi():
+    from ctypes import wintypes
+    u, g = ctypes.windll.user32, ctypes.windll.gdi32
+    h = ctypes.c_void_p
+    u.GetDC.argtypes, u.GetDC.restype = [h], h
+    u.ReleaseDC.argtypes = [h, h]
+    g.CreateCompatibleDC.argtypes, g.CreateCompatibleDC.restype = [h], h
+    g.CreateCompatibleBitmap.argtypes, g.CreateCompatibleBitmap.restype = [h, ctypes.c_int, ctypes.c_int], h
+    g.SelectObject.argtypes, g.SelectObject.restype = [h, h], h
+    g.BitBlt.argtypes = [h, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, h, ctypes.c_int, ctypes.c_int,
+                         wintypes.DWORD]
+    g.GetDIBits.argtypes = [h, h, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    g.DeleteObject.argtypes = [h]
+    g.DeleteDC.argtypes = [h]
+    return u, g
+
+
+_GDI = _init_gdi()
+
+
+def grab_region(box):
+    """Screen pixels of box (l, t, r, b) in virtual-screen coordinates. Copies only that rectangle with GDI;
+    ImageGrab captures every monitor and then crops (~100 ms per call)."""
+    l, t, r, b = (int(v) for v in box)
+    w, h = r - l, b - t
+    if w <= 0 or h <= 0:
+        raise ValueError(f"empty capture region {box}")
+    u, g = _GDI
+    sdc = u.GetDC(None)
+    mdc = g.CreateCompatibleDC(sdc)
+    bmp = g.CreateCompatibleBitmap(sdc, w, h)
+    old = g.SelectObject(mdc, bmp)
+    try:
+        g.BitBlt(mdc, 0, 0, w, h, sdc, l, t, 0x00CC0020)                    # SRCCOPY
+        g.SelectObject(mdc, old)                                            # GetDIBits needs it deselected
+        hdr = (ctypes.c_uint32 * 10)()                                      # BITMAPINFOHEADER, top-down 32 bpp
+        hdr[0], hdr[1], hdr[2] = 40, w, ctypes.c_uint32(-h).value
+        hdr[3] = 1 | (32 << 16)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not g.GetDIBits(sdc, bmp, 0, h, buf, hdr, 0):
+            raise OSError("GetDIBits failed")
+        return Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1).copy()
+    finally:
+        g.DeleteObject(bmp)
+        g.DeleteDC(mdc)
+        u.ReleaseDC(None, sdc)
+
+
+def local_tab_visible(tab):
+    """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved)."""
+    tx, ty = tab
+    img = grab_region((int(tx) - 6, int(ty) - 6, int(tx) + 90, int(ty) + 24))
+    return any(w[0].lower().startswith("local") for ln in ocr.recognize(img, 4) for w in ln)
 
 
 def eve_clients():
@@ -226,7 +281,7 @@ def scan_screens():
     results = []
     clients = eve_clients()
     for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
-        img = ImageGrab.grab(bbox=(mx, my, mx + mw, my + mh), all_screens=True).convert("RGB")
+        img = grab_region((mx, my, mx + mw, my + mh))
         for w in locator.find_local_windows(img):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
@@ -256,6 +311,7 @@ class App(tk.Tk):
         self.edges = []
         self.thumb = None
         self.scan_thread = None
+        self.check_thread = None   # background capture + OCR of the member list
         self.auto_search = True    # keep searching, and start watching as soon as Local is found
         self.scan_result = None
         self.scan_for_watch = False
@@ -703,6 +759,8 @@ class App(tk.Tk):
         if sid is not None and sid != self.cur_sid:
             self.cur_sid = sid
             log(f"LOCATION {self.uni.sys[sid]['name']}")
+            for v in self.maps:                           # new system: re-centre and re-fit the jump radius
+                v.zoom, v.pan = 1.0, [0.0, 0.0]
             self.rescan_reports()
             self.draw_map()
 
@@ -869,13 +927,16 @@ class App(tk.Tk):
         self.preview.config(image=self.thumb, text="")
 
     def grab(self):
-        return ImageGrab.grab(bbox=self.current["list"], all_screens=True).convert("RGB")
+        return grab_region(self.current["list"])
 
     # ---- watching --------------------------------------------------------------------------
     def toggle_watch(self):
         self.stop() if self.running else self.start()
 
     def start(self):
+        if self.job:                                      # restarting on another window: drop the old loop
+            self.after_cancel(self.job)
+            self.job = None
         self.known = None
         self.joined = {}
         self.pending = {}
@@ -971,13 +1032,6 @@ class App(tk.Tk):
         log(f"PAUSED: {self.lock_account or 'window'} disappeared")
         self.set_state("PAUSED", "paused")
 
-    def tab_visible(self):
-        """Cheap check that the 'Local' tab is still where we left it (the window wasn't closed/covered/moved)."""
-        tx, ty = self.current["tab"]
-        box = (int(tx) - 6, int(ty) - 6, int(tx) + 90, int(ty) + 24)
-        img = ImageGrab.grab(bbox=box, all_screens=True).convert("RGB")
-        return any(w[0].lower().startswith("local") for ln in ocr.recognize(img, 4) for w in ln)
-
     def update_names(self, seen, clipped=frozenset()):
         """seen: {name: standing}. Returns [(name, standing)] of never-seen-before players who have shown up in
         2 scans in a row. Position in the list doesn't matter. A reading that is just a known name with the
@@ -1028,7 +1082,46 @@ class App(tk.Tk):
             if now - self.last_relocate >= RELOCATE_EVERY:
                 self.last_relocate = now
                 self.start_scan(True)
-            if not self.tab_visible():                        # window gone/covered: never read whatever is behind it
+            if self.check_thread and self.check_thread.is_alive():      # previous check still running
+                self.job = self.after(100, self.tick)
+                return
+            # screen capture + OCR (~150 ms) run on a worker so the window stays responsive
+            tab, box, known = self.current["tab"], self.current["list"], set(self.known or ())
+            res = {}
+
+            def work():
+                try:
+                    res["visible"] = local_tab_visible(tab)
+                    if res["visible"]:
+                        res["img"] = grab_region(box)
+                        res["read"] = read_names(res["img"], known)
+                except Exception as ex:
+                    res["error"] = ex
+
+            self.check_thread = threading.Thread(target=work, daemon=True)
+            self.check_thread.start()
+            self.job = self.after(20, lambda: self.check_done(res, now))
+        except Exception as ex:
+            self.status.set(f"Error: {ex}")
+            log(f"ERROR {ex!r}")
+            self.job = self.after(int(max(0.2, self.interval.get()) * 1000), self.tick)
+
+    def check_done(self, res, started):
+        """Main thread: apply the result of one background check, then schedule the next one."""
+        if self.check_thread.is_alive():
+            self.job = self.after(20, lambda: self.check_done(res, started))
+            return
+        if not self.running:
+            return
+        if self.paused:
+            self.job = self.after(1000, self.tick)
+            return
+        next_in = max(0.05, max(0.2, self.interval.get()) - (time.time() - started))
+        try:
+            now = time.time()
+            if "error" in res:
+                raise res["error"]
+            if not res["visible"]:                            # window gone/covered: never read whatever is behind it
                 self.tab_misses += 1
                 if self.tab_misses >= 3:
                     self.start_scan(True)
@@ -1045,9 +1138,8 @@ class App(tk.Tk):
                     self.status.set("WATCHING")
                     self.set_state("WATCHING", "watch")
                 self.tab_misses = 0
-            img = self.grab()
-            self.show_preview(img)
-            seen, unsure, clipped = read_names(img, set(self.known or ()))
+            self.show_preview(res["img"])
+            seen, unsure, clipped = res["read"]
             new = self.update_names(seen, clipped)
             self.diff_text.set(f"Names visible: {len(seen)}   Known: {len(self.known)}   "
                                f"Unsure rows: {len(unsure)}   (last check {time.strftime('%H:%M:%S')})")
@@ -1066,7 +1158,7 @@ class App(tk.Tk):
         except Exception as ex:
             self.status.set(f"Error: {ex}")
             log(f"ERROR {ex!r}")
-        self.job = self.after(int(max(0.2, self.interval.get()) * 1000), self.tick)
+        self.job = self.after(int(next_in * 1000), self.tick)
 
     def refresh_list(self, seen):
         """Local list: newcomers first (red = alerted, green = friendly), then everyone else seen this session."""

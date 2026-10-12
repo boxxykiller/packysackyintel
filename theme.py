@@ -141,9 +141,11 @@ def apply(root):
     # -- frames / cards
     st.configure("TFrame", background=BG)
     st.configure("Header.TFrame", background=BG)
-    rc = px(10)
-    st.element_create("Card.bg", "image", _photo(_rrect(2 * rc + 4, 2 * rc + 4, rc, SURFACE, BORDER)),
-                      border=rc, sticky="nsew")
+    # ttk tiles the middle of an image element to fill the widget: keep that middle big, or every redraw of a
+    # large card is tens of thousands of tiny blits (seconds of CPU)
+    rc, mid = px(10), 512
+    st.element_create("Card.bg", "image", _photo(_rrect(2 * rc + mid, 2 * rc + mid, rc, SURFACE, BORDER)),
+                      border=rc, width=2 * rc + 4, height=2 * rc + 4, sticky="nsew")
     st.layout("Card.TFrame", [("Card.bg", {"sticky": "nsew"})])
     st.configure("Card.TFrame", background=BG)
     st.configure("CardBody.TFrame", background=SURFACE)
@@ -164,7 +166,7 @@ def apply(root):
 
     # -- buttons
     rb = px(8)
-    n = 2 * rb + 4
+    n = 2 * rb + 128                                     # big middle: see the card note above
 
     def button(style, normal, active, pressed, disabled, fg, dfg=DIM, bg=SURFACE):
         el = style.replace(".TButton", "") + ".Button.bg"
@@ -172,7 +174,7 @@ def apply(root):
                           ("disabled", _photo(_rrect(n, n, rb, *disabled))),
                           ("pressed", _photo(_rrect(n, n, rb, *pressed))),
                           ("active", _photo(_rrect(n, n, rb, *active))),
-                          border=rb, padding=(px(4), px(2)), sticky="nsew")
+                          border=rb, padding=(px(4), px(2)), width=2 * rb + 4, height=2 * rb + 4, sticky="nsew")
         st.layout(style, [(el, {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
         st.configure(style, background=bg, foreground=fg, padding=(px(10), px(4)), anchor="center",
@@ -221,8 +223,8 @@ def apply(root):
 
     # -- slider: thin rounded track + round knob
     th, kn = px(6), px(16)
-    track_im = Image.new("RGBA", (4 * th, kn), (0, 0, 0, 0))
-    track_im.paste(_rrect(4 * th, th, th // 2, BORDER), (0, (kn - th) // 2))
+    track_im = Image.new("RGBA", (256, kn), (0, 0, 0, 0))
+    track_im.paste(_rrect(256, th, th // 2, BORDER), (0, (kn - th) // 2))
     track = _photo(track_im)
     ss = 4
     knob_im = Image.new("RGBA", (kn * ss, kn * ss), (0, 0, 0, 0))
@@ -233,7 +235,8 @@ def apply(root):
                                        width=3 * ss)
     knob = _photo(knob_im.resize((kn, kn), Image.LANCZOS))
     knob_hi = _photo(knob_hi_im.resize((kn, kn), Image.LANCZOS))
-    st.element_create("Brand.Horizontal.Scale.trough", "image", track, border=(th // 2, 0), sticky="ew")
+    st.element_create("Brand.Horizontal.Scale.trough", "image", track, border=(th // 2, 0), width=4 * th,
+                      height=kn, sticky="ew")
     st.element_create("Brand.Horizontal.Scale.slider", "image", knob, ("active", knob_hi), ("pressed", knob_hi),
                       sticky="")
     st.layout("Horizontal.TScale", [("Brand.Horizontal.Scale.trough", {"sticky": "ew", "children": [

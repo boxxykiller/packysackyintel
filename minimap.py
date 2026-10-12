@@ -18,13 +18,14 @@ class MapView(ttk.Frame):
         self.app = app
         self.popout = popout
         self.view = tk.StringVar(value=VIEW_NEARBY)
-        self.jumps = tk.IntVar(value=6)
+        self.jumps = tk.IntVar(value=7)
         self.names = tk.BooleanVar(value=True)
         self.show_wh = tk.BooleanVar(value=True)
         self.fontsize = tk.IntVar(value=10)
         self.info = tk.StringVar(value="Waiting for your current system…")
         self.report = tk.StringVar(value="")
         self.hover = tk.StringVar(value="")
+        self.details = tk.BooleanVar(value=False)      # report / wormhole text under the map (off = bigger map)
         self.zoom, self.pan = 1.0, [0.0, 0.0]
         self.drawn = []                      # [(x, y, system id)] for hover lookups
         self._drag = None
@@ -37,12 +38,14 @@ class MapView(ttk.Frame):
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda e: self.refit())
         ttk.Label(bar, text="Jumps", style="Card.Muted.TLabel").pack(side="left", padx=(12, 4))
-        ttk.Spinbox(bar, from_=1, to=30, width=3, textvariable=self.jumps, command=self.refit).pack(side="left")
+        ttk.Spinbox(bar, from_=1, to=15, width=3, textvariable=self.jumps, command=self.refit).pack(side="left")
         ttk.Label(bar, text="Text", style="Card.Muted.TLabel").pack(side="left", padx=(12, 4))
         ttk.Spinbox(bar, from_=7, to=22, width=3, textvariable=self.fontsize, command=self.draw).pack(side="left")
         ttk.Checkbutton(bar, text="Names", variable=self.names, command=self.draw,
                         style="Card.TCheckbutton").pack(side="left", padx=(14, 0))
         ttk.Checkbutton(bar, text="Wormholes", variable=self.show_wh, command=self.draw,
+                        style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(bar, text="Details", variable=self.details, command=self.show_details,
                         style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
         ttk.Button(bar, text="Fit", width=4, command=self.refit).pack(side="left", padx=(12, 0))
         if not popout:
@@ -51,10 +54,10 @@ class MapView(ttk.Frame):
                                                                                          pady=(8, 0))
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=1, highlightbackground=theme.BORDER,
                                 highlightcolor=theme.BORDER, width=560, height=340)
-        self.canvas.grid(row=2, column=0, sticky="nsew", pady=(6, 6))
-        ttk.Label(self, textvariable=self.hover, style="Card.Muted.TLabel").grid(row=3, column=0, sticky="w")
-        ttk.Label(self, textvariable=self.report, wraplength=600, justify="left", style="Card.TLabel").grid(
-            row=4, column=0, sticky="w")
+        self.canvas.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
+        self.report_lbl = ttk.Label(self, textvariable=self.report, wraplength=600, justify="left",
+                                    style="Card.TLabel")
+        self.hover.trace_add("write", lambda *a: self.draw_hover())
 
         c = self.canvas
         c.bind("<Configure>", lambda e: self.draw())
@@ -64,6 +67,25 @@ class MapView(ttk.Frame):
         c.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
         c.bind("<Motion>", self.on_move)
         c.bind("<Double-Button-1>", lambda e: self.refit())
+
+    def show_details(self):
+        if self.details.get():
+            self.report_lbl.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        else:
+            self.report_lbl.grid_remove()
+
+    def draw_hover(self):
+        """Hover / help line drawn on the map itself (bottom-left) so it takes no space."""
+        c = self.canvas
+        c.delete("hover")
+        text = self.hover.get()
+        if not text:
+            return
+        t = c.create_text(10, c.winfo_height() - 10, text=text, anchor="sw", fill=theme.MUTED,
+                          font=(theme.FONT, 9), tags="hover")
+        l, tp, r, b = c.bbox(t)
+        c.create_rectangle(l - 6, tp - 3, r + 6, b + 3, fill=theme.SURFACE, outline=theme.BORDER, tags="hover")
+        c.tag_raise(t)
 
     # ---- interaction -----------------------------------------------------------------------
     def refit(self):
@@ -245,3 +267,4 @@ class MapView(ttk.Frame):
             lines.append("Not on this view: " + ", ".join(off_map))
         lines += self.wormhole_summary(dist)
         self.report.set("\n".join(lines) if lines else "No recent intel reports.")
+        self.draw_hover()

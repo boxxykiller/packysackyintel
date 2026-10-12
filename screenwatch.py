@@ -29,6 +29,8 @@ import locator
 import minimap
 import ocr
 import universe
+import updater
+from version import VERSION
 
 ALERT_STANDINGS = {"neutral", "hostile", "unknown"}      # corp (green), fleet (purple), allies (blue) are ignored
 STANDING_LABEL = {"neutral": "neutral", "hostile": "HOSTILE", "unknown": "unknown",
@@ -236,7 +238,7 @@ def scan_screens():
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("The Packy Sacky Intel Tool")
+        self.title(f"The Packy Sacky Intel Tool  v{VERSION}")
         self.resizable(True, True)
         self.geometry("1180x840")
         self.columnconfigure(1, weight=1)
@@ -383,6 +385,11 @@ class App(tk.Tk):
         self.after(500, self.intel_tick)
 
         self.place_away_from_game()
+        self.update_state = None
+        if "--updated" in sys.argv:
+            self.status.set(f"Updated to v{VERSION}.")
+        if updater.is_frozen() and "--updated" not in sys.argv and "--no-update" not in sys.argv:
+            self.after(1500, self.start_update)             # check GitHub for a newer release
         self.after(300, self.find_windows)          # look for Local windows on launch
 
     def place_away_from_game(self):
@@ -403,6 +410,49 @@ class App(tk.Tk):
                 self.geometry(f"{ww}x{hh}{rect[0]:+d}{rect[1]:+d}")
         except Exception as ex:
             log(f"PLACEMENT ERROR {ex!r}")
+
+    # ---- auto update -----------------------------------------------------------------------
+    def start_update(self):
+        """Background: look for a newer GitHub release; if there is one, download it and restart into it."""
+        self.update_state = {"phase": "check", "progress": "", "error": None, "path": None, "info": None}
+        st = self.update_state
+
+        def work():
+            try:
+                info = updater.check_latest()
+                if not info:
+                    st["phase"] = "none"
+                    return
+                st["info"] = info
+                st["phase"] = "download"
+                st["path"] = updater.download(
+                    info, lambda d, t: st.__setitem__("progress", f"{d * 100 // t}%"))
+                st["phase"] = "ready"
+            except Exception as ex:                          # offline, private repo, rate limit, bad download...
+                st["error"], st["phase"] = repr(ex), "error"
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(300, self.poll_update)
+
+    def poll_update(self):
+        st = self.update_state
+        if st["phase"] in ("check", "download"):
+            if st["phase"] == "download":
+                self.status.set(f"Downloading update v{st['info']['version']}… {st['progress']}")
+            self.after(300, self.poll_update)
+        elif st["phase"] == "error":
+            log(f"UPDATE CHECK FAILED {st['error']}")
+        elif st["phase"] == "ready":
+            log(f"UPDATING v{VERSION} -> v{st['info']['version']}")
+            self.status.set(f"Installing v{st['info']['version']} and restarting…")
+            self.update()
+            try:
+                updater.apply_and_restart(st["path"])
+            except Exception as ex:
+                log(f"UPDATE APPLY FAILED {ex!r}")
+                self.status.set(f"Update downloaded but could not be installed: {ex}")
+                return
+            self.after(200, self.destroy)
 
     # ---- finding Local windows -------------------------------------------------------------
     def start_scan(self, for_watch):

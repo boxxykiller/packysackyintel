@@ -1,5 +1,4 @@
 # build output
-*.exe
 build/
 dist/
 *.spec

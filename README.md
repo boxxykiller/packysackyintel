@@ -8,6 +8,9 @@ A Windows desktop tool for EVE Online that watches your Local chat and your inte
   it is covered by another EVE client or any other window. This uses Windows Graphics Capture, the same window
   capture OBS and Discord use: Windows hands over the picture of the window it already has. It follows the
   window if it moves or resizes, and pauses while it is minimized or closed, resuming on its own.
+- **Manual area.** If the automatic search picks the wrong spot, press *Set area manually…* and drag a box
+  around the Local member list. It is saved per account, relative to that client's window (so it follows the
+  window and survives restarts); *Auto area* goes back to finding Local automatically.
 - **No interaction with the game (EULA).** Clients are found from Windows' own list of open windows (title
   `EVE - <account>`, position, minimized or not). The tool never opens, attaches to, reads the memory of,
   injects into, or sends input or messages to the EVE client - it only looks at the window's pixels, the

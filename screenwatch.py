@@ -5,6 +5,7 @@ import ctypes
 import ctypes.wintypes
 import datetime
 import difflib
+import json
 import math
 import os
 import re
@@ -211,6 +212,35 @@ def log(msg):
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
     except OSError:
         pass
+
+
+SETTINGS = os.path.join(os.path.dirname(LOG), "packy_settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    try:
+        with open(SETTINGS, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except OSError as ex:
+        log(f"SETTINGS SAVE FAILED {ex!r}")
+
+
+def client_origin(hwnd):
+    """Screen position of a client window's top-left, the point manual areas are stored relative to."""
+    if wgc:
+        return wgc.frame_origin(hwnd)
+    r = ctypes.wintypes.RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top
 
 
 def clean_name(text):
@@ -437,6 +467,8 @@ class App(tk.Tk):
         self.lock_account = ""      # locked EVE client (title 'EVE - <account>'), "" = any client
         self.lock_hwnd = None       # its window handle, so it is followed even if the title changes
         self.clients = []           # [(account, rect, hwnd)] for the client picker
+        self.settings = load_settings()
+        self.areas = self.settings.setdefault("areas", {})   # account -> manual area relative to its client
         self.grace_until = 0.0
         self.joined = {}           # name -> (time, standing) for people who entered after start-up
         self.known = None          # {name: standing} - everyone seen at start-up or already alerted
@@ -496,6 +528,10 @@ class App(tk.Tk):
         self.toggle = ttk.Button(wf, text="Start watching", command=self.toggle_watch, state="disabled",
                                  style="Primary.TButton")
         self.toggle.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=(12, 0))
+        ttk.Button(wf, text="Set area manually…", command=self.set_area).grid(
+            row=5, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
+        self.auto_btn = ttk.Button(wf, text="Auto area", command=self.auto_area, state="disabled")
+        self.auto_btn.grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
 
         # -- status + live preview
         sc, sf = theme.card(f, "Status")
@@ -741,6 +777,10 @@ class App(tk.Tk):
             self.auto_search = True
         if self.running or not self.auto_search:
             return
+        saved = self.saved_area()
+        if saved:                                         # the player drew this area: use it, no searching
+            self.use_area(saved)
+            return
         self.status.set(f"Searching {self.lock_account}'s client for Local chat…" if self.lock_hwnd
                         else "Searching all screens for Local chat windows…")
         self.set_state("SEARCHING", "search")
@@ -845,6 +885,154 @@ class App(tk.Tk):
         self.combo["values"] = []
         self.combo.set("")
         self.toggle.config(text="Start watching", style="Primary.TButton", state="disabled")
+        self.hide_outline()
+        self.find_windows(True)
+
+    # ---- manual monitoring area --------------------------------------------------------------
+    def area_box(self, account, hwnd):
+        """Screen box of the saved area for account: relative to its client window, or absolute (account '')."""
+        rel = self.areas.get(account)
+        if not rel:
+            return None
+        ox, oy = client_origin(hwnd) if hwnd else (0, 0)
+        return (ox + rel[0], oy + rel[1], ox + rel[2], oy + rel[3])
+
+    def saved_area(self):
+        """A watch target from a saved manual area: for the locked client, or with 'any client' the first open
+        client that has one (or an area drawn on no client at all)."""
+        cands = [c for c in eve_clients() if not self.lock_hwnd or c[2] == self.lock_hwnd]
+        for account, rect, hwnd in cands:
+            if account in self.areas:
+                return {"account": account, "hwnd": hwnd, "client_rect": rect,
+                        "list": self.area_box(account, hwnd)}
+        if not self.lock_hwnd and "" in self.areas:
+            return {"account": "", "hwnd": None, "client_rect": None, "list": self.area_box("", None)}
+        return None
+
+    def use_area(self, target):
+        self.current = {"system": (self.current or {}).get("system", ""), "tab": None, "tab_h": 11,
+                        "manual": True, "monitor": 0, "score": 9, **target}
+        self.windows = [self.current]
+        self.combo["values"] = [self.label(self.current, 1) + "  (manual area)"]
+        self.combo.current(0)
+        self.toggle.config(state="normal")
+        self.auto_btn.config(state="normal")
+        log(f"MANUAL AREA {target['account'] or 'screen'} {self.current['list']}")
+        self.start()
+
+    def follow_area(self):
+        """Keep a manual area on its client as the window moves. False while the client is closed / minimized."""
+        account = self.current.get("account", "")
+        if not account:
+            return True                                   # an area on no client: nothing to follow
+        c = find_client(self.current.get("hwnd"), account)
+        if not c or client_state(c[2]) != "open":
+            return False
+        box = self.area_box(account, c[2])
+        self.current["hwnd"], self.current["client_rect"] = c[2], c[1]
+        if box and box != tuple(self.current["list"]):
+            self.current["list"] = box
+            self.show_outline(theme.GOOD)
+        return True
+
+    def resume_area(self):
+        self.paused = False
+        self.grace_until = time.time() + GRACE_AFTER_JUMP
+        self.show_outline(theme.GOOD)
+        self.status.set(f"WATCHING {self.current.get('account') or 'the screen'} - manual area.")
+        self.set_state("WATCHING", "watch")
+        log(f"RESUMED {self.current.get('account') or 'manual area'}")
+
+    def set_area(self):
+        """Let the player drag a box over the Local member list. It is drawn on a see-through overlay window of
+        this tool; nothing is sent to the game."""
+        if getattr(self, "_overlay", None):
+            return
+        was_running = self.running
+        if self.job:
+            self.after_cancel(self.job)
+            self.job = None
+        self.running = False
+        self.hide_outline()
+        vx, vy, vw, vh = virtual_screen()
+        ov = self._overlay = tk.Toplevel(self)
+        ov.overrideredirect(True)
+        ov.attributes("-topmost", True)
+        ov.attributes("-alpha", 0.35)
+        ov.geometry(f"{vw}x{vh}{vx:+d}{vy:+d}")
+        c = tk.Canvas(ov, bg="#000000", highlightthickness=0, cursor="crosshair")
+        c.pack(fill="both", expand=True)
+        for mx, my, mw, mh in monitors():                 # instructions on every screen
+            c.create_text(mx - vx + mw / 2, my - vy + 60, fill="#FFFFFF", font=(theme.FONT, 16, "bold"),
+                          text="Drag a box around the Local member list (all the names).   Esc = cancel")
+        if self.current:                                  # where it watches now, as a starting hint
+            l, t, r, b = self.current["list"]
+            c.create_rectangle(l - vx, t - vy, r - vx, b - vy, outline=theme.WARN, width=2, dash=(6, 4))
+        drag = {}
+
+        def press(e):
+            drag["start"] = (e.x, e.y)
+            c.delete("sel")
+
+        def move(e):
+            if "start" in drag:
+                c.delete("sel")
+                c.create_rectangle(*drag["start"], e.x, e.y, outline=theme.GOOD, width=3, tags="sel")
+
+        def done(box=None):
+            self._overlay = None
+            ov.destroy()
+            if box:
+                self.apply_area(box)
+            elif was_running and self.current:
+                self.start()
+
+        def release(e):
+            if "start" not in drag:
+                return
+            (x0, y0), (x1, y1) = drag["start"], (e.x, e.y)
+            box = (min(x0, x1) + vx, min(y0, y1) + vy, max(x0, x1) + vx, max(y0, y1) + vy)
+            done(box if box[2] - box[0] >= 30 and box[3] - box[1] >= 30 else None)
+
+        c.bind("<ButtonPress-1>", press)
+        c.bind("<B1-Motion>", move)
+        c.bind("<ButtonRelease-1>", release)
+        ov.bind("<Escape>", lambda e: done())
+        ov.focus_force()
+
+    def apply_area(self, box):
+        """Save a drawn area (relative to the client window it is on) and start watching it."""
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        clients = eve_clients()
+        if self.lock_hwnd:
+            c = next((c for c in clients if c[2] == self.lock_hwnd), None)
+        else:
+            c = next((c for c in clients if c[1][0] <= cx < c[1][2] and c[1][1] <= cy < c[1][3]), None)
+        account, hwnd, rect = (c[0], c[2], c[1]) if c else ("", None, None)
+        ox, oy = client_origin(hwnd) if hwnd else (0, 0)
+        self.areas[account] = [box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy]
+        save_settings(self.settings)
+        self.use_area({"account": account, "hwnd": hwnd, "client_rect": rect, "list": tuple(box)})
+        self.status.set(f"WATCHING {account or 'the screen'} - manual area (saved; 'Auto area' goes back).")
+
+    def auto_area(self):
+        """Forget the manual area for this client and go back to finding Local automatically."""
+        cur = self.current or {}
+        account = cur.get("account", "") if cur.get("manual") else self.lock_account
+        self.areas.pop(account, None)
+        save_settings(self.settings)
+        log(f"AUTO AREA {account or 'screen'}")
+        if self.job:
+            self.after_cancel(self.job)
+            self.job = None
+        self.running = False
+        self.paused = False
+        self.current = None
+        self.windows = []
+        self.combo["values"] = []
+        self.combo.set("")
+        self.toggle.config(text="Start watching", style="Primary.TButton", state="disabled")
+        self.auto_btn.config(state="disabled")
         self.hide_outline()
         self.find_windows(True)
 
@@ -1233,7 +1421,7 @@ class App(tk.Tk):
         self.hide_outline()
         self.names_text.set("")
         who = self.lock_account or "the Local"
-        tx, ty = self.current["tab"]
+        tx, ty = self.current["tab"] or (-10 ** 6, -10 ** 6)          # (a manual area has no tab)
         covered = (not self.lock_hwnd                    # a locked client is read even when covered
                    and self.winfo_rootx() <= tx <= self.winfo_rootx() + self.winfo_width()
                    and self.winfo_rooty() <= ty <= self.winfo_rooty() + self.winfo_height())
@@ -1291,10 +1479,19 @@ class App(tk.Tk):
             return
         try:
             now = time.time()
+            manual = self.current.get("manual")
             if self.paused:                                   # waiting for the window: just keep looking
                 if now - self.last_relocate >= 2.0:
                     self.last_relocate = now
-                    self.start_scan(True)
+                    if manual:
+                        if self.follow_area():
+                            self.resume_area()
+                    else:
+                        self.start_scan(True)
+                self.job = self.after(1000, self.tick)
+                return
+            if manual and not self.follow_area():             # a drawn area: just follow its client window
+                self.pause()
                 self.job = self.after(1000, self.tick)
                 return
             moved = False
@@ -1306,7 +1503,7 @@ class App(tk.Tk):
                     moved = True
                 elif (r.left, r.top, r.right, r.bottom) != tuple(self.current["client_rect"]):
                     moved = True
-            if moved or now - self.last_relocate >= RELOCATE_EVERY:
+            if not manual and (moved or now - self.last_relocate >= RELOCATE_EVERY):
                 self.last_relocate = now
                 self.start_scan(True)
             if self.check_thread and self.check_thread.is_alive():      # previous check still running
@@ -1314,12 +1511,13 @@ class App(tk.Tk):
                 return
             # screen capture + OCR (~150 ms) run on a worker so the window stays responsive
             tab, box, known = self.current["tab"], self.current["list"], set(self.known or ())
-            hwnd, th = self.lock_hwnd, self.current.get("tab_h", 11)
+            hwnd = self.lock_hwnd or (self.current.get("hwnd") if manual else None)
+            th = self.current.get("tab_h", 11)
             res = {}
 
             def work():
                 try:
-                    res["visible"] = local_tab_visible(tab, hwnd, th)
+                    res["visible"] = True if tab is None else local_tab_visible(tab, hwnd, th)
                     if res["visible"]:
                         res["img"] = grab_box(box, hwnd)
                         res["read"] = read_names(res["img"], known)

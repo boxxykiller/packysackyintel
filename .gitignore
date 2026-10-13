@@ -8,3 +8,4 @@ __pycache__/
 # runtime logs
 packy_log.txt
 boxxy_log.txt
+packy_settings.json

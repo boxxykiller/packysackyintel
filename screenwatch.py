@@ -481,6 +481,8 @@ class App(tk.Tk):
         self.volume = tk.IntVar(value=100)
         self.message = tk.StringVar(value="RUN FOR YOUR LIFE")
         self.popup = tk.BooleanVar(value=False)
+        self.outline_on = tk.BooleanVar(value=self.settings.get("outline", True))
+        self.outline_color = None  # colour of the outline currently wanted, so it can be restored
         self.status = tk.StringVar(value="Press 'Find Local windows' with EVE visible on screen.")
         self.diff_text = tk.StringVar(value="")
         self.names_text = tk.StringVar(value="")
@@ -532,6 +534,9 @@ class App(tk.Tk):
             row=5, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
         self.auto_btn = ttk.Button(wf, text="Auto area", command=self.auto_area, state="disabled")
         self.auto_btn.grid(row=5, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+        ttk.Checkbutton(wf, text="Show outline around watched area", variable=self.outline_on,
+                        command=self.outline_toggled, style="Card.TCheckbutton").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         # -- status + live preview
         sc, sf = theme.card(f, "Status")
@@ -1281,14 +1286,17 @@ class App(tk.Tk):
         self.after(1000, self.intel_tick)
 
     # ---- outline / preview -----------------------------------------------------------------
-    def hide_outline(self):
+    def hide_outline(self, keep=False):
+        if not keep:
+            self.outline_color = None
         for w in self.edges:
             w.destroy()
         self.edges = []
 
     def show_outline(self, color):
         self.hide_outline()
-        if not self.current:
+        self.outline_color = color
+        if not self.current or not self.outline_on.get():
             return
         l, t, r, b = self.current["list"]
         k = 3  # border drawn just outside the region so it is never captured
@@ -1300,6 +1308,14 @@ class App(tk.Tk):
             e.configure(bg=color)
             e.geometry(f"{w}x{h}{x:+d}{y:+d}")
             self.edges.append(e)
+
+    def outline_toggled(self):
+        self.settings["outline"] = self.outline_on.get()
+        save_settings(self.settings)
+        if self.outline_on.get() and self.outline_color:
+            self.show_outline(self.outline_color)
+        else:
+            self.hide_outline(keep=True)
 
     def show_preview(self, img):
         im = img.convert("RGB")

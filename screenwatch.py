@@ -72,6 +72,12 @@ def monitors():
     return out or [virtual_screen()]
 
 
+def geo(w, h, x, y):
+    """Tk geometry string for a window at screen position (x, y). Always '+x+y': Tk reads '-x' as a distance
+    from the right / bottom edge, so a monitor left of or above the main one (negative x / y) needs '+-x'."""
+    return f"{int(w)}x{int(h)}+{int(x)}+{int(y)}"
+
+
 def _init_gdi():
     from ctypes import wintypes
     u, g = ctypes.windll.user32, ctypes.windll.gdi32
@@ -706,7 +712,7 @@ class App(tk.Tk):
                     best = (overlap, rect, ww, hh)
             if best:
                 _, rect, ww, hh = best
-                self.geometry(f"{ww}x{hh}{rect[0]:+d}{rect[1]:+d}")
+                self.geometry(geo(ww, hh, rect[0], rect[1]))
         except Exception as ex:
             log(f"PLACEMENT ERROR {ex!r}")
 
@@ -800,6 +806,8 @@ class App(tk.Tk):
             if c:
                 self.lock_account, self.lock_hwnd = c[0], c[2]
         hwnd = self.lock_hwnd
+        if not hwnd and for_watch and self.running and not self.paused and self.current:
+            hwnd = self.current.get("hwnd")               # 'any client' while watching: stay on that client
 
         def work():
             try:
@@ -907,7 +915,7 @@ class App(tk.Tk):
         except Exception as ex:
             log(f"CLIENT LIST ERROR {ex!r}")
         if wgc:
-            wgc.release(keep=self.lock_hwnd)              # drop captures of clients no longer locked / closed
+            wgc.release(keep=self.watch_hwnd())           # drop captures of clients no longer watched / closed
         self.after(3000, self.refresh_clients)
 
     def pick_client(self, idx):
@@ -1003,34 +1011,46 @@ class App(tk.Tk):
             self.job = None
         self.running = False
         self.hide_outline()
-        vx, vy, vw, vh = virtual_screen()
-        ov = self._overlay = tk.Toplevel(self)
-        ov.overrideredirect(True)
-        ov.attributes("-topmost", True)
-        ov.attributes("-alpha", 0.35)
-        ov.geometry(f"{vw}x{vh}{vx:+d}{vy:+d}")
-        c = tk.Canvas(ov, bg="#000000", highlightthickness=0, cursor="crosshair")
-        c.pack(fill="both", expand=True)
-        for mx, my, mw, mh in monitors():                 # instructions on every screen
-            c.create_text(mx - vx + mw / 2, my - vy + 60, fill="#FFFFFF", font=(theme.FONT, 16, "bold"),
+        # one overlay per monitor: a single window spanning every screen lands in the wrong place when monitors
+        # sit at negative coordinates or use different scaling. Mouse positions are taken as screen coordinates
+        # (x_root / y_root), so a drag can start on one monitor and end on another.
+        panes = []                                        # (overlay, canvas, monitor x, monitor y)
+        for mx, my, mw, mh in monitors():
+            ov = tk.Toplevel(self)
+            ov.overrideredirect(True)
+            ov.attributes("-topmost", True)
+            ov.attributes("-alpha", 0.35)
+            ov.geometry(geo(mw, mh, mx, my))
+            c = tk.Canvas(ov, bg="#000000", highlightthickness=0, cursor="crosshair")
+            c.pack(fill="both", expand=True)
+            c.create_text(mw / 2, 60, fill="#FFFFFF", font=(theme.FONT, 16, "bold"),
                           text="Drag a box around the Local member list (all the names).   Esc = cancel")
-        if self.current:                                  # where it watches now, as a starting hint
-            l, t, r, b = self.current["list"]
-            c.create_rectangle(l - vx, t - vy, r - vx, b - vy, outline=theme.WARN, width=2, dash=(6, 4))
+            if self.current:                              # where it watches now, as a starting hint
+                l, t, r, b = self.current["list"]
+                c.create_rectangle(l - mx, t - my, r - mx, b - my, outline=theme.WARN, width=2, dash=(6, 4))
+            panes.append((ov, c, mx, my, mw, mh))
+        self._overlay = panes
         drag = {}
 
+        def draw(x0, y0, x1, y1):
+            for _, c, mx, my, _, _ in panes:
+                c.delete("sel")
+                c.create_rectangle(x0 - mx, y0 - my, x1 - mx, y1 - my, outline=theme.GOOD, width=3, tags="sel")
+
         def press(e):
-            drag["start"] = (e.x, e.y)
-            c.delete("sel")
+            drag["start"] = (e.x_root, e.y_root)
+            draw(e.x_root, e.y_root, e.x_root, e.y_root)
 
         def move(e):
             if "start" in drag:
-                c.delete("sel")
-                c.create_rectangle(*drag["start"], e.x, e.y, outline=theme.GOOD, width=3, tags="sel")
+                draw(*drag["start"], e.x_root, e.y_root)
 
         def done(box=None):
+            if self._overlay is None:
+                return
             self._overlay = None
-            ov.destroy()
+            for ov, *_ in panes:
+                ov.destroy()
             if box:
                 self.apply_area(box)
             elif was_running and self.current:
@@ -1039,24 +1059,35 @@ class App(tk.Tk):
         def release(e):
             if "start" not in drag:
                 return
-            (x0, y0), (x1, y1) = drag["start"], (e.x, e.y)
-            box = (min(x0, x1) + vx, min(y0, y1) + vy, max(x0, x1) + vx, max(y0, y1) + vy)
+            (x0, y0), (x1, y1) = drag["start"], (e.x_root, e.y_root)
+            box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
             done(box if box[2] - box[0] >= 30 and box[3] - box[1] >= 30 else None)
 
-        c.bind("<ButtonPress-1>", press)
-        c.bind("<B1-Motion>", move)
-        c.bind("<ButtonRelease-1>", release)
-        ov.bind("<Escape>", lambda e: done())
-        ov.focus_force()
+        for ov, c, *_ in panes:
+            c.bind("<ButtonPress-1>", press)
+            c.bind("<B1-Motion>", move)
+            c.bind("<ButtonRelease-1>", release)
+            ov.bind("<Escape>", lambda e: done())
+        px, py = self.winfo_pointerxy()                   # keyboard focus (for Esc) on the screen under the mouse
+        next((ov for ov, _, mx, my, mw, mh in panes if mx <= px < mx + mw and my <= py < my + mh),
+             panes[0][0]).focus_force()
 
     def apply_area(self, box):
         """Save a drawn area (relative to the client window it is on) and start watching it."""
         cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
         clients = eve_clients()
+        inside = lambda c: c[1][0] <= cx < c[1][2] and c[1][1] <= cy < c[1][3]      # noqa: E731
         if self.lock_hwnd:
             c = next((c for c in clients if c[2] == self.lock_hwnd), None)
+            if not c or not inside(c):                    # it would read pixels outside the locked client
+                log(f"MANUAL AREA rejected {box}: not on {self.lock_account}'s client {c[1] if c else 'closed'}")
+                if self.current:
+                    self.start()
+                self.status.set(f"That box is not on {self.lock_account}'s client. Draw it over the Local member "
+                                f"list in that client, or pick a different EVE client first.")
+                return
         else:
-            c = next((c for c in clients if c[1][0] <= cx < c[1][2] and c[1][1] <= cy < c[1][3]), None)
+            c = next((c for c in clients if inside(c)), None)
         account, hwnd, rect = (c[0], c[2], c[1]) if c else ("", None, None)
         ox, oy = client_origin(hwnd) if hwnd else (0, 0)
         self.areas[account] = [box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy]
@@ -1121,7 +1152,7 @@ class App(tk.Tk):
                            for r in rects)
 
             mx, my, mw, mh = min(monitors(), key=lambda m: (covered(m, clients), covered(m, [app])))
-            win.geometry(f"{max(400, mw - 80)}x{max(300, mh - 120)}{mx + 40:+d}{my + 40:+d}")
+            win.geometry(geo(max(400, mw - 80), max(300, mh - 120), mx + 40, my + 40))
             win.after(50, lambda: win.state("zoomed"))
         except Exception as ex:
             log(f"MAP PLACEMENT ERROR {ex!r}")
@@ -1350,7 +1381,7 @@ class App(tk.Tk):
             e.overrideredirect(True)
             e.attributes("-topmost", True)
             e.configure(bg=color)
-            e.geometry(f"{w}x{h}{x:+d}{y:+d}")
+            e.geometry(geo(w, h, x, y))
             self.edges.append(e)
 
     def outline_toggled(self):
@@ -1367,8 +1398,13 @@ class App(tk.Tk):
         self.thumb = ImageTk.PhotoImage(im)
         self.preview.config(image=self.thumb, text="")
 
+    def watch_hwnd(self):
+        """The client window being read: the locked one, or with 'any client' the one its Local was found on -
+        read from that window's own image, so another client moved on top of it never takes its place."""
+        return self.lock_hwnd or (self.current or {}).get("hwnd")
+
     def grab(self):
-        return grab_box(self.current["list"], self.lock_hwnd)
+        return grab_box(self.current["list"], self.watch_hwnd())
 
     # ---- watching --------------------------------------------------------------------------
     def toggle_watch(self):
@@ -1423,6 +1459,13 @@ class App(tk.Tk):
         top = max((w.get("score", 0) for w in res), default=0)
         cands = [w for w in res if w.get("score", 0) == top]   # the best-confirmed member list(s) only
         if not cands:
+            watched = self.watch_hwnd()
+            if (not self.paused and self.tab_misses == 0 and self.current.get("tab")
+                    and (not watched or client_state(watched) == "open")):
+                # the Local tab is still where it was (checked every read), only the member-count header was
+                # missed this time - typically right as someone joins and the tab and header counts differ for
+                # a moment. The zone was confirmed before, so keep reading it instead of pausing.
+                return
             self.misses += 1
             if self.misses >= 2 and not self.paused:
                 self.pause()
@@ -1482,7 +1525,7 @@ class App(tk.Tk):
         self.names_text.set("")
         who = self.lock_account or "the Local"
         tx, ty = self.current["tab"] or (-10 ** 6, -10 ** 6)          # (a manual area has no tab)
-        covered = (not self.lock_hwnd                    # a locked client is read even when covered
+        covered = (not self.watch_hwnd()                # a watched client is read even when covered
                    and self.winfo_rootx() <= tx <= self.winfo_rootx() + self.winfo_width()
                    and self.winfo_rooty() <= ty <= self.winfo_rooty() + self.winfo_height())
         state = client_state(self.lock_hwnd) if self.lock_hwnd else "open"
@@ -1569,10 +1612,11 @@ class App(tk.Tk):
                 self.job = self.after(1000, self.tick)
                 return
             moved = False
-            if self.lock_hwnd and self.current.get("client_rect"):    # locked client moved / resized / minimized
+            watched = self.watch_hwnd()
+            if watched and self.current.get("client_rect"):     # watched client moved / resized / minimized
                 r = ctypes.wintypes.RECT()
-                if ctypes.windll.user32.IsIconic(self.lock_hwnd) or not ctypes.windll.user32.GetWindowRect(
-                        self.lock_hwnd, ctypes.byref(r)):
+                if ctypes.windll.user32.IsIconic(watched) or not ctypes.windll.user32.GetWindowRect(
+                        watched, ctypes.byref(r)):
                     self.misses = 1
                     moved = True
                 elif (r.left, r.top, r.right, r.bottom) != tuple(self.current["client_rect"]):
@@ -1585,8 +1629,8 @@ class App(tk.Tk):
                 return
             # screen capture + OCR (~150 ms) run on a worker so the window stays responsive
             tab, box, known = self.current["tab"], self.current["list"], set(self.known or ())
-            hwnd = self.lock_hwnd or (self.current.get("hwnd") if manual else None)
-            th = self.current.get("tab_h", 11)
+            hwnd = self.watch_hwnd()
+            th =self.current.get("tab_h", 11)
             res = {}
 
             def work():

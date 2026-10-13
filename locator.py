@@ -35,6 +35,30 @@ def _fraction_lines(gray, box, axis, thresh=10, need=0.9):
     return [sum(g) // len(g) for g in lines]
 
 
+def _edge_thresh(gray, box):
+    """Brightness step that counts as a window line, measured from the picture. Opaque windows keep the old
+    fixed 10; behind a see-through window the lines are only as strong as the space background lets them be,
+    so the step is set just above that background's own pixel-to-pixel noise (every player's opacity and
+    backdrop differ - nothing here is a setting)."""
+    crop = gray.crop(box)
+    if crop.width < 3 or crop.height < 3:
+        return 10
+    d = ImageChops.difference(crop, ImageChops.offset(crop, 1, 0)).histogram()
+    total, run = sum(d), 0
+    for v, n in enumerate(d):                      # 90th percentile of the steps = the background's noise
+        run += n
+        if run >= total * 0.9:
+            return max(4, min(10, v + 1))
+    return 10
+
+
+def _window_lines(gray, box, axis="v"):
+    """Window lines in box: the normal strong, unbroken line first; failing that, a fainter, slightly broken
+    one, with the contrast bar set from this background's own noise."""
+    return (_fraction_lines(gray, box, axis)
+            or _fraction_lines(gray, box, axis, thresh=_edge_thresh(gray, box), need=0.75))
+
+
 def _tab_words(lines):
     """Words that are the 'Local' channel tab (not the word 'Local' inside a chat message such as
     'Channel changed to Local : <system>')."""
@@ -96,7 +120,19 @@ def _member_header(img, tx, ty, th, count):
     if box[2] - box[0] < 20 or box[3] - box[1] < 8:
         return None
     hits = []
-    strip = ImageOps.autocontrast(img.crop(box).convert("L")).convert("RGB")     # the count is dim grey text
+    crop = img.crop(box).convert("L")
+    # the count is dim grey text; behind a see-through window the background can be as bright as it, so a
+    # plain contrast stretch is tried first, then histogram equalisation (pulls the text out of a bright nebula)
+    for prep in (ImageOps.autocontrast, ImageOps.equalize):
+        _header_hits(prep(crop).convert("RGB"), box, tx, th, count, hits)
+        if any(h[3] == 2 for h in hits):
+            break
+    # best match with the tab's count, then closest to the tab row (chat lines further down can contain bare
+    # numbers too), then nearest the tab
+    return min(hits, key=lambda h: (-h[3], round(h[1] / th), h[0] - tx), default=None)
+
+
+def _header_hits(strip, box, tx, th, count, hits):
     for ln in ocr.recognize(strip, 3):
         for w in ln:
             m = _COUNT_RE.match(w[0])
@@ -112,19 +148,16 @@ def _member_header(img, tx, ty, th, count):
             else:
                 continue                                              # another window's count: never Local's
             hits.append((x, box[1] + w[2], box[1] + w[2] + w[4], match))
-    # best match with the tab's count, then closest to the tab row (chat lines further down can contain bare
-    # numbers too), then nearest the tab
-    return min(hits, key=lambda h: (-h[3], round(h[1] / th), h[0] - tx), default=None)
 
 
-def _vline_extent(gray, x, y, th):
+def _vline_extent(gray, x, y, th, thresh=10):
     """How far a vertical window line at column x (passing through row y) runs up and down: (top, bottom).
     Short breaks (up to ~1.5 text lines) are bridged."""
     W, H = gray.size
     xs = range(max(0, x - 2), min(W - 1, x + 3))
 
     def edge(yy):
-        return any(abs(gray.getpixel((xx, yy)) - gray.getpixel((xx + 1, yy))) > 10 for xx in xs)
+        return any(abs(gray.getpixel((xx, yy)) - gray.getpixel((xx + 1, yy))) > thresh for xx in xs)
 
     gap = int(th * 1.5) + 1
     ends = []
@@ -171,16 +204,24 @@ def find_local_windows(img):
             continue
         hx, htop, hbot, match = head
         band_t, band_b = int(hbot + th), int(min(H, hbot + th * 8))          # a band of list rows under the header
-        left = _fraction_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b), "v")
+        left = _window_lines(gray, (max(0, int(hx - 8 * th)), band_t, int(hx), band_b))
         div = left[-1] if left else int(hx - 2.6 * th)                       # line just left of the header
         y0 = int(hbot + 3)
-        ext_top, ext_bot = _vline_extent(gray, div, (band_t + band_b) // 2, th)
+        band = (max(0, int(hx - 8 * th)), band_t, int(hx), band_b)
+        ext_top, ext_bot = _vline_extent(gray, div, (band_t + band_b) // 2, th,
+                                         10 if _fraction_lines(gray, band, "v") else _edge_thresh(gray, band))
         x0 = div + 3
-        right = _fraction_lines(gray, (int(x0 + 4 * th), band_t, min(W - 1, int(x0 + 60 * th)), band_b), "v")
+        right = _window_lines(gray, (int(x0 + 4 * th), band_t, min(W - 1, int(x0 + 60 * th)), band_b))
         x1 = (right[0] - 2) if right else min(W - 1, int(x0 + 22 * th))
         # bottom of the panel = a line that runs on past the divider into the chat side. Member rows can have
         # their own highlighted backgrounds whose edges stop at the list, so those never end the list early.
         horiz = _fraction_lines(gray, (max(0, int(div - 2 * th)), int(y0 + th), x1, H), "h")
+        if not horiz:
+            # faint (see-through) bottom line: the fainter test would also accept a highlighted row's edge, so
+            # a line only counts when it also runs on along the chat side, left of the divider
+            ls = _window_lines(gray, (x0, int(y0 + th), x1, H), "h")
+            cs = _window_lines(gray, (max(0, int(div - 3 * th)), int(y0 + th), div - 1, H), "h")
+            horiz = [y for y in ls if any(abs(y - c) <= 1 for c in cs)]
         y1 = horiz[0] - 1 if horiz else (ext_bot if ext_bot - y0 > 3 * th else H)
         DEBUG.append(f"tab=({tx:.0f},{ty:.0f}) th={th:.0f} count={count} header={head} div={div} "
                      f"right={right[:1]} divider_runs={ext_top}-{ext_bot} bottom_lines={horiz[:2]} "

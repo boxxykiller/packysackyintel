@@ -264,6 +264,20 @@ def same_name(a, b):
     return name_key(a) == name_key(b)
 
 
+def looks_like(name, me):
+    """True if an OCR reading is probably `me`: the same name with the usual misreads, cut short at either
+    end (a few letters lost to the list's edge), or a near spelling ('cxykiller' for 'boxxykiller')."""
+    if not me:
+        return False
+    a, b = name_key(name), name_key(me)
+    if not a or not b:
+        return False
+    if a == b or (len(a) >= 4 and (b.endswith(a) or b.startswith(a))):
+        return True
+    m = difflib.SequenceMatcher(None, a, b)
+    return len(a) >= 4 and (m.ratio() >= 0.75 or m.find_longest_match(0, len(a), 0, len(b)).size >= max(5, len(a) - 2))
+
+
 def is_cut_short(clipped, name, other):
     """A name running into the right edge of the list is cut off by the game: it may be the start of `other`."""
     a, b = name_key(name), name_key(other)
@@ -275,25 +289,40 @@ def classify_standing(img, x0, x1, yc):
     return icon_standing(img, x0, x1, yc)[0]
 
 
+def _chroma(p):
+    return max(p) - min(p)
+
+
+def _bg_floor(img, y0, y1):
+    """Least colourfulness (max-min) a pixel needs on rows y0..y1 to count as part of a standing icon. With a
+    see-through chat window the space background (often blue nebula) shows behind the rows and is as
+    colourful as a dim icon; the row's median - mostly background, the white names add almost nothing -
+    sets the bar, so a grey neutral icon (or no icon) over a coloured background is never read as friendly."""
+    vals = sorted(_chroma(img.getpixel((x, y))) for y in range(y0, y1) for x in range(0, img.width, 2))
+    return max(28, vals[len(vals) // 2] + 18) if vals else 28
+
+
 def icon_standing(img, x0, x1, yc):
     """(standing, debug text). Classified by hue, so dark icons count too: EVE's icons are dim (green ~29,104,22,
     blue ~8,29,96) and a purple fleet icon has two strong channels, so a fixed max-min gap misses it."""
     xa, xb = max(0, int(x0) - 1), min(img.width, int(x1) + 2)
     y0, y1 = max(0, int(yc) - 4), min(img.height, int(yc) + 5)
+    floor = _bg_floor(img, y0, y1)
     sat = []
     for x in range(xa, xb):
         for y in range(y0, y1):
             p = img.getpixel((x, y))
             hi, lo = max(p), min(p)
-            if hi >= 45 and hi - lo >= 28 and (hi - lo) / hi >= 0.4:      # coloured, not grey / white text
+            if hi >= 45 and hi - lo >= floor and (hi - lo) / hi >= 0.4:   # coloured, not grey / white / background
                 sat.append(p)
-    if len(sat) < 6:
-        return "neutral", f"icon px={len(sat)}"              # no icon = neutral
+    need = max(6, (xb - xa) * (y1 - y0) // 5)                 # a real icon is a solid square, not a few specks
+    if len(sat) < need:
+        return "neutral", f"icon px={len(sat)} need={need} bg={floor}"   # no icon / grey icon = neutral
     r = sum(p[0] for p in sat) / len(sat)
     g = sum(p[1] for p in sat) / len(sat)
     b = sum(p[2] for p in sat) / len(sat)
     hue = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360
-    info = f"icon px={len(sat)} rgb=({r:.0f},{g:.0f},{b:.0f}) hue={hue:.0f}"
+    info = f"icon px={len(sat)} rgb=({r:.0f},{g:.0f},{b:.0f}) hue={hue:.0f} bg={floor}"
     if 80 <= hue < 170:
         return "corp", info                                  # green
     if 170 <= hue < 255:
@@ -306,15 +335,29 @@ def icon_standing(img, x0, x1, yc):
 
 
 def icon_columns(img):
-    """Horizontal extent (l, r) of the coloured standing icons in the left edge of the list, or None."""
-    strip = img.crop((0, 0, min(img.width, 44), img.height)).convert("HSV")
-    _, sat, val = strip.split()
-    mask = ImageChops.multiply(sat.point(lambda p: 255 if p > 110 else 0), val.point(lambda p: 255 if p > 55 else 0))   # icons are dim
-    per_col = mask.resize((mask.width, 1), Image.BOX)                 # mean 0..255 per column
-    need = 6 * 255 / max(1, mask.height)                              # at least ~6 coloured pixels in the column
-    hits = [x for x, v in enumerate(per_col.get_flattened_data() if hasattr(per_col, "get_flattened_data")
-                                    else per_col.getdata()) if v >= need]
-    return (min(hits), max(hits) + 1) if hits else None
+    """Horizontal extent (l, r) of the coloured standing icons in the left edge of the list, or None.
+    Pixels must stand out from the list's background (see _bg_floor), and the extent is taken around the
+    strongest column: a see-through window's background only adds a spread-out tint, and counting every
+    tinted column pushed the name crop into the names, cutting their first letters off."""
+    strip = img.crop((0, 0, min(img.width, 44), img.height))
+    floor = _bg_floor(img, 0, img.height)
+    sw_, sh = strip.size
+    data = list(strip.get_flattened_data() if hasattr(strip, "get_flattened_data") else strip.getdata())
+    counts = [0] * sw_
+    for i, p in enumerate(data):
+        hi, c = max(p), _chroma(p)
+        if hi >= 45 and c >= floor and c / hi >= 0.4:
+            counts[i % sw_] += 1
+    if not counts or max(counts) < 6:                                  # at least ~6 coloured pixels in a column
+        return None
+    peak = max(range(sw_), key=counts.__getitem__)
+    cut = max(6, counts[peak] * 0.35)
+    l = r = peak
+    while l > 0 and counts[l - 1] >= cut:
+        l -= 1
+    while r < sw_ - 1 and counts[r + 1] >= cut:
+        r += 1
+    return l, r + 1
 
 
 # Three different pre-processing passes; a name is only trusted when at least two of them read it the same way.
@@ -472,6 +515,7 @@ class App(tk.Tk):
         self.grace_until = 0.0
         self.joined = {}           # name -> (time, standing) for people who entered after start-up
         self.known = None          # {name: standing} - everyone seen at start-up or already alerted
+        self.last_img = None       # the last member-list image read
         self.pending = {}          # name key -> consecutive scans a candidate new name has been seen
         self.aliases = set()       # OCR misreadings of known names
 
@@ -1454,6 +1498,10 @@ class App(tk.Tk):
         log(f"PAUSED: {self.lock_account or 'window'} disappeared")
         self.set_state("PAUSED", "paused")
 
+    def me(self):
+        """Name of the character whose client is being watched (never alerted on)."""
+        return (self.current or {}).get("account") or self.lock_account or ""
+
     def update_names(self, seen, clipped=frozenset()):
         """seen: {name: standing}. Returns [(name, standing)] of never-seen-before players who have shown up in
         2 scans in a row. Position in the list doesn't matter. A reading that is just a known name with the
@@ -1462,13 +1510,23 @@ class App(tk.Tk):
             self.known = dict(seen) if self.known is None else {**self.known, **seen}
             self.pending = {}
             if len(self.known) == len(seen):
-                log(f"BASELINE {len(seen)} names: {sorted(seen)}")
+                log(f"BASELINE {len(seen)} names: " + ", ".join(f"{n}={st}" for n, st in sorted(seen.items())))
+                if self.last_img is not None:
+                    try:
+                        self.last_img.save(os.path.join(os.path.dirname(LOG), "packy_last_list.png"))
+                    except Exception:
+                        pass
             return []
         missing = set(self.known) - set(seen)
         new = []
         now_keys = set()
+        me = self.me()
         for n, st in seen.items():
             if n in self.known or n in self.aliases:
+                continue
+            if looks_like(n, me):                                     # the watching character itself
+                self.aliases.add(n)
+                log(f"IGNORED '{n}' as the watching character '{me}'")
                 continue
             canon = next((k for k in self.known if same_name(n, k) or is_cut_short(clipped, n, k)), None)
             if canon is None:                                         # also a close look-alike of someone who just vanished
@@ -1583,6 +1641,7 @@ class App(tk.Tk):
                     self.set_state("WATCHING", "watch")
                 self.tab_misses = 0
             self.show_preview(res["img"])
+            self.last_img = res["img"]
             seen, unsure, clipped = res["read"]
             new = self.update_names(seen, clipped)
             self.diff_text.set(f"Names visible: {len(seen)}   Known: {len(self.known)}   "
@@ -1612,11 +1671,16 @@ class App(tk.Tk):
         for n, (t, st) in reversed(list(self.joined.items())):
             lb.insert("end", f"NEW {t}  {n}  [{STANDING_LABEL[st]}]")
             lb.itemconfig("end", fg=theme.DANGER_TEXT if st in ALERT_STANDINGS else theme.GOOD)
-        for n in sorted(set(self.known or {}) - set(self.joined), key=str.lower):
+        me = self.me()
+        rest = [n for n in set(self.known or {}) - set(self.joined) if not looks_like(n, me)]
+        # neutrals / hostiles who were already here at start-up are listed first, in red, so they're not missed
+        for n in sorted(rest, key=lambda n: (self.known[n] not in ALERT_STANDINGS, n.lower())):
             st = self.known[n]
             lb.insert("end", f"{n}  [{STANDING_LABEL[st]}]" + ("" if n in seen else "   (not visible)"))
             if n not in seen:
                 lb.itemconfig("end", fg=theme.DIM)
+            elif st in ALERT_STANDINGS:
+                lb.itemconfig("end", fg=theme.DANGER_TEXT)
         lb.yview_moveto(top)
 
     # ---- alerting --------------------------------------------------------------------------

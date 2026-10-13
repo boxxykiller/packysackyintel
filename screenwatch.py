@@ -172,7 +172,7 @@ def eve_clients(include_minimized=False):
     EULA-safe by design: this only asks the Windows window manager for its own list of top-level windows
     (title, position, visible / minimized). The game process is never opened, attached to, read from or
     sent any message (GetWindowText on another process's window returns the caption Windows already has
-    cached; it does not send WM_GETTEXT). Everything else this tool knows comes from the screen pixels."""
+    cached; it does not send WM_GETTEXT; GetClassName is likewise the window manager's own record). Everything else this tool knows comes from the screen pixels."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
     out = []
@@ -183,7 +183,10 @@ def eve_clients(include_minimized=False):
             buf = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(hwnd, buf, 256)
             m = re.match(r"^EVE\s+-\s+(.+)$", buf.value)
-            if m:
+            cls = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls, 64)
+            # only the game's own window: thumbnail tools (EVE-O Preview ...) title their previews 'EVE - <name>' too
+            if m and cls.value == "trinityWindow":
                 r = wintypes.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(r))
                 out.append((m.group(1).strip(), (r.left, r.top, r.right, r.bottom), hwnd))
@@ -445,21 +448,28 @@ def find_local(img):
 
 def scan_screens(lock_hwnd=None):
     """Find every visible Local chat. Returns [{'system','tab','list','monitor','account','hwnd'}] in screen coords.
+    Each EVE client is read from its own window image (so a covered client is still found); a Local that is not
+    on an EVE client only counts when no client is open.
     With lock_hwnd only that client's window area is captured, and only a Local that is on that client counts."""
     results = []
     clients = eve_clients()
     lock = next((c for c in clients if c[2] == lock_hwnd), None) if lock_hwnd else None
     if lock_hwnd and not lock:
         return results                                    # locked client closed / minimized
-    got = window_capture(lock[2]) if lock else None
-    if got is not None:                                   # the locked client's own image: covered or not
+    unread = []                                           # clients window capture couldn't read
+    for c in ([lock] if lock else clients):               # each client's own image: covered or not
+        got = window_capture(c[2])
+        if got is None:
+            unread.append(c)
+            continue
         img, (ox, oy) = got
         for w in find_local(img):
             tx, ty, tw, th = w["tab"]
             l, t, r, b = w["list"]
-            results.append({"system": w["system"], "monitor": 0, "account": lock[0], "hwnd": lock[2],
-                            "client_rect": lock[1], "tab": (ox + tx, oy + ty), "tab_h": th, "score": w["score"],
+            results.append({"system": w["system"], "monitor": 0, "account": c[0], "hwnd": c[2],
+                            "client_rect": c[1], "tab": (ox + tx, oy + ty), "tab_h": th, "score": w["score"],
                             "list": (ox + int(l), oy + int(t), ox + int(r), oy + int(b))})
+    if clients and not unread:
         return sorted(results, key=lambda r: -r["score"])
     for i, (mx, my, mw, mh) in enumerate(monitors(), 1):
         area = (mx, my, mx + mw, my + mh)
@@ -477,6 +487,8 @@ def scan_screens(lock_hwnd=None):
             owner = next((c for c in clients if c[1][0] <= px < c[1][2] and c[1][1] <= py < c[1][3]), None)
             if lock and (owner is None or owner[2] != lock[2]):
                 continue                                  # another client is on top of the locked one here
+            if clients and owner not in unread:
+                continue                                  # not on an EVE client (or on one already read above)
             results.append({"system": w["system"], "monitor": i,
                             "account": owner[0] if owner else "", "hwnd": owner[2] if owner else None,
                             "client_rect": owner[1] if owner else None,

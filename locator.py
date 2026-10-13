@@ -1,7 +1,7 @@
 """Find EVE 'Local' chat windows on a screenshot using OCR + simple line detection (no game attachment)."""
 import re
 
-from PIL import Image, ImageChops, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 
 import ocr
 
@@ -127,6 +127,8 @@ def _member_header(img, tx, ty, th, count):
         _header_hits(prep(crop).convert("RGB"), box, tx, th, count, hits)
         if any(h[3] == 2 for h in hits):
             break
+    if not any(h[3] == 2 for h in hits):
+        _short_number_hits(ImageOps.autocontrast(crop), box, tx, th, count, hits)
     # best match with the tab's count, then closest to the tab row (chat lines further down can contain bare
     # numbers too), then nearest the tab
     return min(hits, key=lambda h: (-h[3], round(h[1] / th), h[0] - tx), default=None)
@@ -139,15 +141,68 @@ def _header_hits(strip, box, tx, th, count, hits):
             if not m:
                 continue
             n, x = m.group(1), box[0] + w[1]
-            if count is not None and int(n) == count:
-                match = 2
-            elif count is not None and (n.startswith(str(count)) or str(count).startswith(n)):
-                match = 1
-            elif count is None and x <= tx + 60 * th:                 # tab's count unreadable: nearest number
-                match = 0
-            else:
+            match = _match(n, x, tx, th, count)
+            if match is None:
                 continue                                              # another window's count: never Local's
             hits.append((x, box[1] + w[2], box[1] + w[2] + w[4], match))
+
+
+def _match(n, x, tx, th, count):
+    """How well a number read near the tab fits as Local's member count (see _member_header), or None."""
+    if count is not None and int(n) == count:
+        return 2
+    if count is not None and (n.startswith(str(count)) or str(count).startswith(n)):
+        return 1
+    if count is None and x <= tx + 60 * th:
+        return 0
+    return None
+
+
+def _short_number_hits(g, box, tx, th, count, hits, copies=3):
+    """Windows OCR drops a word of a single character, so a count of 1-9 (a quiet system) is never read. Small
+    isolated blobs of text in the strip are cut out, each repeated side by side ('3' -> '333'), and all read
+    in one OCR call; a blob whose reading is one number repeated exactly is that number."""
+    W, H = g.size
+    # lit pixels, grown by 1 px so the digits of one number join up (the person icon stays apart from them)
+    data = g.point(lambda v: 255 if v > 110 else 0).filter(ImageFilter.MaxFilter(3)).tobytes()
+    lit = {i for i, v in enumerate(data) if v}
+    blobs = []
+    while lit:                                            # connected groups of lit pixels
+        stack = [lit.pop()]
+        x0 = x1 = stack[0] % W
+        y0 = y1 = stack[0] // W
+        while stack:
+            p = stack.pop()
+            x, y = p % W, p // W
+            x0, x1, y0, y1 = min(x0, x), max(x1, x), min(y0, y), max(y1, y)
+            for q in ((p - 1) if x else -1, (p + 1) if x < W - 1 else -1, p - W, p + W):
+                if q in lit:
+                    lit.discard(q)
+                    stack.append(q)
+        if 0.5 * th <= y1 - y0 <= 1.6 * th and 3 <= x1 - x0 <= 3 * th:   # 1-4 digits, not a chat word
+            blobs.append((x0 + 1, y0 + 1, x1, y1))          # undo the 1 px growth
+    blobs = sorted(blobs, key=lambda b: (b[1], b[0]))[:40]  # the header is near the top of the strip
+    if not blobs:
+        return
+    cw = max(b[2] - b[0] for b in blobs) * copies + 4 * th
+    ch = max(b[3] - b[1] for b in blobs) + 2
+    sheet = Image.new("L", (int(cw), int(len(blobs) * ch * 3 + ch)), 0)
+    for i, (x0, y0, x1, y1) in enumerate(blobs):          # one blob per line, well apart
+        piece = g.crop((x0 - 1, y0 - 1, x1 + 1, y1 + 1))
+        for k in range(copies):
+            sheet.paste(piece, (int(th) + k * (piece.width + 1), int(ch + i * ch * 3)))
+    for ln in ocr.recognize(sheet.convert("RGB"), 3):
+        text = "".join(w[0] for w in ln)
+        i = int(round((min(w[2] for w in ln) - ch) / (ch * 3)))
+        if not 0 <= i < len(blobs) or not text.isdigit() or len(text) % copies:
+            continue
+        n = text[:len(text) // copies]
+        if n * copies != text or len(n) > 4:
+            continue
+        x0, y0, x1, y1 = blobs[i]
+        match = _match(n, box[0] + x0, tx, th, count)
+        if match is not None:
+            hits.append((box[0] + x0, box[1] + y0, box[1] + y1, match))
 
 
 def _vline_extent(gray, x, y, th, thresh=10):

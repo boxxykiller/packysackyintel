@@ -31,6 +31,7 @@ import intel
 import locator
 import minimap
 import ocr
+import skyhooks
 import theme
 import universe
 import updater
@@ -1140,6 +1141,9 @@ class App(tk.Tk):
         self.maps = []
         self.wormholes = []        # active Thera / Turnur connections (EVE-Scout)
         self.after(2000, self.refresh_wormholes)
+        self.skyhooks = []         # raidable Orbital Skyhooks (ESI), open now or opening soon
+        self.after(2500, self.refresh_skyhooks)
+        self.after(60_000, self.tick_skyhooks)
         mc, mf = theme.card(parent, "Mini map")
         parent.add(mc, weight=3)
         mf.columnconfigure(0, weight=1)
@@ -1208,6 +1212,44 @@ class App(tk.Tk):
             log(f"WORMHOLES {len(self.wormholes)} active")
             self.draw_map()
         self.after(300_000, self.refresh_wormholes)
+
+    def refresh_skyhooks(self):
+        """Every 5 minutes (ESI caches the list that long), fetch the raidable skyhooks in the background."""
+        def work():
+            try:
+                self._sky_result = skyhooks.fetch()
+            except Exception as ex:                          # offline / ESI down: keep the last list
+                self._sky_result = None
+                log(f"SKYHOOK FETCH FAILED {ex!r}")
+
+        self._sky_result = "pending"
+        threading.Thread(target=work, daemon=True).start()
+        self.after(500, self.poll_skyhooks)
+
+    def poll_skyhooks(self):
+        if self._sky_result == "pending":
+            self.after(500, self.poll_skyhooks)
+            return
+        if self._sky_result is not None:
+            self.skyhooks = self._sky_result
+            log(f"SKYHOOKS {len(self.skyhooks)} raidable / upcoming")
+            self.draw_map()
+        self.after(300_000, self.refresh_skyhooks)
+
+    def tick_skyhooks(self):
+        """Once a minute: redraw so the skyhook countdowns stay current (and closed windows drop off)."""
+        if self.skyhooks:
+            self.draw_map()
+        self.after(60_000, self.tick_skyhooks)
+
+    def live_skyhooks(self):
+        """[(hook, ('open' | 'soon', minutes))] for skyhooks whose theft window hasn't ended yet."""
+        out = []
+        for h in self.skyhooks:
+            st = skyhooks.status(h)
+            if st:
+                out.append((h, st))
+        return out
 
     def report_ttl(self):
         return REPORT_TTL

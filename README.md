@@ -22,6 +22,9 @@ A Windows desktop tool for EVE Online that watches your Local chat and your inte
   System names and pilot names are clickable links to zKillboard.
 - **Mini map** of the region / nearby systems with your location (from the Local chat log), intel reports
   and gate-jump distances. Zoom, pan, pop out to its own window.
+- **Raidable skyhooks** on the mini map, from CCP's public ESI (`/skyhooks/raidable`, refreshed every 5 minutes):
+  an orange square with the time left while a skyhook's reagent silo is open to theft, a grey one with a
+  countdown for windows opening soon. *Details* lists the nearest ones by gate jumps.
 
 ## Run from source
 

@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 
+import skyhooks
 import theme
 
 VIEW_NEARBY = "Nearby systems"
@@ -10,6 +11,8 @@ BG = theme.WELL
 HUB_COLORS = {"Thera": theme.VIOLET, "Turnur": theme.CYAN}
 SEC_COLORS = ("#4ADE80", "#F59E0B", "#F43F5E")          # high / low / null sec
 GATE = "#3A5378"
+SKYHOOK = theme.WARN
+SKYHOOK_TEXT = theme.WARN_TEXT
 NAME = "#C3CEDF"
 
 
@@ -22,6 +25,7 @@ class MapView(ttk.Frame):
         self.jumps = tk.IntVar(value=7)
         self.names = tk.BooleanVar(value=True)
         self.show_wh = tk.BooleanVar(value=True)
+        self.show_sky = tk.BooleanVar(value=True)
         self.fontsize = tk.IntVar(value=10)
         self.info = tk.StringVar(value="Waiting for your current system…")
         self.report = tk.StringVar(value="")
@@ -46,6 +50,8 @@ class MapView(ttk.Frame):
         ttk.Checkbutton(bar, text="Names", variable=self.names, command=self.draw,
                         style="Card.TCheckbutton").pack(side="left", padx=(14, 0))
         ttk.Checkbutton(bar, text="Wormholes", variable=self.show_wh, command=self.draw,
+                        style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(bar, text="Skyhooks", variable=self.show_sky, command=self.draw,
                         style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
         ttk.Checkbutton(bar, text="Details", variable=self.details, command=self.show_details,
                         style="Card.TCheckbutton").pack(side="left", padx=(12, 0))
@@ -125,7 +131,8 @@ class MapView(ttk.Frame):
         far = "" if d is None else "  -  here" if d == 0 else f"  -  {d} jump{'s' if d != 1 else ''}"
         holes = "".join(f"   |   {w['hub']} wormhole {w['sig_in'] or ''}: {w['hours']}h left, {w['size']}"
                         for w in self.app.wormholes if w["sid"] == sid)
-        self.hover.set(f"{s['name']}  ({u.regions.get(s['region'], '?')}, security {s['sec']:.1f}){far}{holes}")
+        hooks = "".join(f"   |   skyhook {skyhooks.describe(h)}" for h, _ in self.app.live_skyhooks() if h["sid"] == sid)
+        self.hover.set(f"{s['name']}  ({u.regions.get(s['region'], '?')}, security {s['sec']:.1f}){far}{holes}{hooks}")
 
     def wormhole_summary(self, dist):
         """Lines about the active Thera / Turnur holes: counts, and the nearest few by gate jumps."""
@@ -141,6 +148,22 @@ class MapView(ttk.Frame):
         for d, w in reach:
             out.append(f"   {w['hub']} -> {w['name']} ({w['region']}): {d} jump{'s' if d != 1 else ''}, "
                        f"{w['hours']}h left, {w['size']}")
+        return out
+
+    def skyhook_summary(self, dist):
+        """Lines about raidable skyhooks: how many are open / opening soon, and the nearest few by gate jumps."""
+        hooks = self.app.live_skyhooks()
+        if not hooks or not self.show_sky.get():
+            return []
+        n_open = sum(1 for _, st in hooks if st[0] == "open")
+        out = [f"Raidable skyhooks: {n_open} open now, {len(hooks) - n_open} opening soon"]
+        u = self.app.uni
+        reach = sorted(((dist[h["sid"]], h) for h, _ in hooks if h["sid"] in dist), key=lambda t: t[0])[:3]
+        for d, h in reach:
+            s = u.sys[h["sid"]]
+            far = "here" if d == 0 else f"{d} jump{'s' if d != 1 else ''}"
+            out.append(f"   {s['name']} ({u.regions.get(s['region'], '?')}): {far}, "
+                       f"{skyhooks.describe(h)}")
         return out
 
     # ---- drawing ---------------------------------------------------------------------------
@@ -298,6 +321,20 @@ class MapView(ttk.Frame):
             col = HUB_COLORS.get(w["hub"], theme.VIOLET)
             c.create_polygon(x, y - 9, x + 9, y, x, y + 9, x - 9, y, outline=col, fill="", width=2)
             put_label(x, y, f"{w['hub']} {w['hours']}h", col)
+        sky_here = {}                                                  # system id -> soonest-ending / opening hook
+        if self.show_sky.get():
+            for h, st in app.live_skyhooks():
+                if h["sid"] in idset:
+                    sky_here.setdefault(h["sid"], []).append(st)
+        for sid, sts in sky_here.items():
+            x, y = pos(sid)
+            opened = sorted(m for k, m in sts if k == "open")
+            col = SKYHOOK if opened else theme.DIM
+            c.create_rectangle(x - 7, y - 7, x + 7, y + 7, outline=col, width=2)
+            more = f" x{len(sts)}" if len(sts) > 1 else ""
+            text = (f"Skyhook{more} {skyhooks.short(opened[0])} left" if opened
+                    else f"Skyhook{more} in {skyhooks.short(min(m for _, m in sts))}")
+            put_label(x, y, text, SKYHOOK_TEXT if opened else theme.MUTED)
         if show_names:
             # each name goes right, left, above or below its dot - wherever it covers no label, name or other
             # dot; if there is no room it is left out (zoom in, or hover the dot, to see it)
@@ -325,7 +362,8 @@ class MapView(ttk.Frame):
 
         sec_cur = u.sys[cur]["sec"]
         self.info.set(f"You: {u.sys[cur]['name']}  -  {u.regions.get(region, '?')}  (security {sec_cur:.1f})   "
-                      f"red rings = intel reports, last {app.report_ttl() // 60} min")
+                      f"red rings = intel reports, last {app.report_ttl() // 60} min"
+                      + ("   -   orange squares = raidable skyhooks" if self.show_sky.get() and app.skyhooks else ""))
         lines = []
         for sid, r in live[:4]:
             d = dist.get(sid)
@@ -335,5 +373,6 @@ class MapView(ttk.Frame):
         if off_map:
             lines.append("Not on this view: " + ", ".join(off_map))
         lines += self.wormhole_summary(dist)
+        lines += self.skyhook_summary(dist)
         self.report.set("\n".join(lines) if lines else "No recent intel reports.")
         self.draw_hover()
